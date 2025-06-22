@@ -1,0 +1,9 @@
+storage_partition:
+  address: 0x0003C000
+  size: 0x4000
+  region: flash_primary
+
+settings_partition:
+  address: 0x00038000
+  size: 0x4000
+  region: flash_primary
