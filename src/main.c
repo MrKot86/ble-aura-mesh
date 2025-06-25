@@ -40,7 +40,6 @@ typedef enum {
 
 static struct nvs_fs fs;
 const struct device *flash_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller));
-
 static uint8_t adv_data[16]; // Buffer for dynamic advertisement data
 
 static bt_addr_le_t static_addr;
@@ -65,7 +64,7 @@ static const struct bt_le_adv_param adv_params = {
 };
 
 device_info_t device_info = {
-    .mode = MODE_NONE,
+    .mode = MODE_DEVICE,
     .affinity = AFFINITY_UNITY,
     .level = 0
 };
@@ -93,6 +92,8 @@ static adv_name_type_t detect_adv_name(const uint8_t *data, uint8_t len) {
     }
     return ADV_TYPE_UNKNOWN;
 }
+
+
 
 // Helper: Decode a single byte into device_info fields (2 bits per field)
 static void decode_device_info(uint8_t val, device_info_t *info) {
@@ -139,7 +140,50 @@ static void handle_master_adv(const bt_addr_le_t *addr, struct net_buf_simple *b
     }
 }
 
-static void handle_zephyr_adv(const bt_addr_le_t *addr, struct net_buf_simple *buf) {
+// Function pointer types for mode-specific handlers
+typedef void (*zephyr_adv_handler_t)(const bt_addr_le_t *, struct net_buf_simple *);
+typedef void (*end_of_cycle_handler_t)(void);
+
+// Forward declarations for mode-specific handlers
+static void handle_zephyr_aura(const bt_addr_le_t *, struct net_buf_simple *);
+static void handle_zephyr_device(const bt_addr_le_t *, struct net_buf_simple *);
+static void handle_zephyr_lvlup_token(const bt_addr_le_t *, struct net_buf_simple *);
+static void handle_zephyr_none(const bt_addr_le_t *, struct net_buf_simple *);
+static void end_of_cycle_aura(void);
+static void end_of_cycle_device(void);
+static void end_of_cycle_lvlup_token(void);
+static void end_of_cycle_none(void);
+
+// Function pointers for current mode
+static zephyr_adv_handler_t current_zephyr_handler = handle_zephyr_none;
+static end_of_cycle_handler_t current_end_of_cycle = end_of_cycle_none;
+
+// Set handlers based on mode
+static void set_mode_handlers(operation_mode_t mode) {
+    switch (mode) {
+        case MODE_AURA:
+            current_zephyr_handler = handle_zephyr_aura;
+            current_end_of_cycle = end_of_cycle_aura;
+            break;
+        case MODE_DEVICE:
+            current_zephyr_handler = handle_zephyr_aura;
+            current_end_of_cycle = end_of_cycle_device;
+            break;
+        case MODE_LVLUP_TOKEN:
+            current_zephyr_handler = handle_zephyr_lvlup_token;
+            current_end_of_cycle = end_of_cycle_lvlup_token;
+            break;
+        case MODE_NONE:
+        default:
+            current_zephyr_handler = handle_zephyr_none;
+            current_end_of_cycle = end_of_cycle_none;
+            break;
+    }
+}
+
+// --- Mode-specific Zephyr handlers (implement as needed) ---
+static void handle_zephyr_aura(const bt_addr_le_t *addr, struct net_buf_simple *buf) {
+
     if (peer_count >= MAX_PEERS) {
         return; // Peer list is full, ignore this advertisement
     }
@@ -171,13 +215,94 @@ static void handle_zephyr_adv(const bt_addr_le_t *addr, struct net_buf_simple *b
         aura_level_count[peer_info.affinity][peer_info.level]++;
     }
 }
+static void handle_zephyr_device(const bt_addr_le_t *addr, struct net_buf_simple *buf) {
+    // Device mode: could ignore or process differently
+}
+static void handle_zephyr_lvlup_token(const bt_addr_le_t *addr, struct net_buf_simple *buf) {
+    // Token mode: implement as needed
+}
+static void handle_zephyr_none(const bt_addr_le_t *addr, struct net_buf_simple *buf) {
+    // None mode: do nothing
+}
 
+// --- Mode-specific end-of-cycle handlers (implement as needed) ---
+static void end_of_cycle_aura(void) {
+    // Aura mode: implement any end-of-cycle logic
+}
+static void end_of_cycle_device(void) {
+    // Count max level and number of peers at max level for each affinity
+    uint8_t max_level[3] = {0};
+    uint8_t peers_at_max_level[3] = {0};
+    uint8_t highest_level = 0;
+    enum led_state led_state = LED_ON; // Default to ON
+    for (int aff = 0; aff < 3; ++aff) {
+        for (int lvl = highest_level; lvl < 4; ++lvl) {
+            if (aura_level_count[aff][lvl] > 0) {
+                max_level[aff] = lvl;
+                peers_at_max_level[aff] = aura_level_count[aff][lvl];
+                if (lvl > highest_level) {
+                    highest_level = lvl; // Update highest level found
+                }
+            }
+        }
+    }
+
+    uint8_t my_affinity = device_info.affinity;
+    uint8_t my_peers_at_highest = aura_level_count[my_affinity][highest_level];
+
+    // Got any?
+    if (peers_at_max_level[AFFINITY_MAGIC] == 0 && peers_at_max_level[AFFINITY_TECHNO] == 0 && peers_at_max_level[AFFINITY_UNITY] == 0) {
+        led_state = LED_OFF;
+    } else if (my_peers_at_highest == 0) {
+        led_state = LED_OFF;
+    } else {
+        for (int aff = 0; aff < 3; ++aff) {
+            // If my affinity has peers at max level, but not the most peers, turn off LED_1
+            if (aff != my_affinity && aura_level_count[aff][highest_level] > my_peers_at_highest) {
+                led_state = LED_OFF;
+                break;
+            }
+        }
+    }
+   
+    // Reset peer and level counts for this cycle
+    peer_count = 0;
+    memset(aura_level_count, 0, sizeof(aura_level_count));
+
+    // If we reach here, it means my affinity has the most peers at max level
+    // Turn on LED_1 to indicate device is active
+    set_led_state(ON_BOARD_LED, led_state);
+}
+static void end_of_cycle_lvlup_token(void) {
+    // Token mode: implement any end-of-cycle logic
+}
+static void end_of_cycle_none(void) {
+    // None mode: implement any end-of-cycle logic
+}
+
+
+// Helper: Encode device_info into a single byte (2 bits per field)
+static uint8_t encode_device_info(const device_info_t *info) {
+    // mode: 2 bits (0-3), affinity: 2 bits (0-3), level: 2 bits (0-3)
+    // [7:6]=mode, [5:4]=affinity, [3:2]=level, [1:0]=reserved(0)
+    uint8_t val = 0;
+    val |= ((info->mode & 0x03) << 6);
+    val |= ((info->affinity & 0x03) << 4);
+    val |= ((info->level & 0x03) << 2);
+    // bits 1:0 left as 0 (reserved)
+    return val;
+}
+
+
+// --- Refactor scan_cb to use current_zephyr_handler ---
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                     struct net_buf_simple *buf)
 {
-    if (rssi < -60) {
+    if (rssi < -45) {
         return; // Ignore weak signals
     }
+    adv_name_type_t advertiser = ADV_TYPE_UNKNOWN;
+    uint8_t mfg_data = 0;
     struct net_buf_simple temp = *buf;
     
     while (temp.len > 1) {
@@ -193,15 +318,72 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                 handle_master_adv(addr, buf);
                 break;
             } else if (adv_type == ADV_TYPE_ZEPHYR) {
-                handle_zephyr_adv(addr, buf);
+                current_zephyr_handler(addr, buf);
                 break;
             }
         }
         temp.data += length;
         temp.len -= length;
     }
+}
 
-    
+
+// --- Unified main loop ---
+static void main_loop(void)
+{
+    operation_mode_t last_mode = device_info.mode;
+    set_mode_handlers(device_info.mode);
+    mode_changed = false;
+    while (1) {
+        // --- Scanning phase ---
+        struct bt_le_scan_param scan_param = {
+            .type = BT_LE_SCAN_TYPE_ACTIVE,
+            .options = BT_LE_SCAN_OPT_NONE,
+            .interval = 0x0010,
+            .window = 0x0010,
+        };
+        int err;
+        uint32_t scan_jitter = sys_rand32_get() % (2 * SCAN_JITTER_MS + 1) - SCAN_JITTER_MS;
+        uint32_t scan_time = SCAN_INTERVAL_MS + scan_jitter;
+        err = bt_le_scan_start(&scan_param, scan_cb);
+        if (err) {
+            printk("Scan start failed: %d\n", err);
+        }
+        k_sleep(K_MSEC(scan_time));
+        bt_le_scan_stop();
+
+        // --- Advertising phase ---
+        adv_data[0] = encode_device_info(&device_info);
+        adv_data[1] = 0;
+        struct bt_data dynamic_ad[] = {
+            BT_DATA(BT_DATA_MANUFACTURER_DATA, adv_data, 2),
+        };
+        uint32_t adv_jitter = sys_rand32_get() % (2 * ADV_JITTER_MS + 1) - ADV_JITTER_MS;
+        uint32_t adv_time = ADV_INTERVAL_MS + adv_jitter;
+        err = bt_le_adv_start(&adv_params, dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
+        if (err) {
+            printk("Adv start failed: %d\n", err);
+        }
+        k_sleep(K_MSEC(adv_time));
+        bt_le_adv_stop();
+
+        // --- End of cycle handler ---
+        current_end_of_cycle();
+
+        // Check for mode change
+        if (device_info.mode != last_mode) {
+            set_mode_handlers(device_info.mode);
+            mode_changed = false;
+            last_mode = device_info.mode;
+            // Reset peer count and aura level counts and LED states
+            peer_count = 0;
+            memset(aura_level_count, 0, sizeof(aura_level_count));
+            // Reset LED states
+            set_led_state(ON_BOARD_LED, LED_OFF);
+            set_led_state(LED_14, LED_OFF);
+            set_led_state(LED_15, LED_OFF);
+        }
+    }
 }
 
 static int init_flash(void) 
@@ -244,185 +426,6 @@ static void generate_static_random_addr(bt_addr_le_t *addr)
     addr->a.val[5] &= 0xC3;
 }
 
-// Helper: Encode device_info into a single byte (2 bits per field)
-static uint8_t encode_device_info(const device_info_t *info) {
-    // mode: 2 bits (0-3), affinity: 2 bits (0-3), level: 2 bits (0-3)
-    // [7:6]=mode, [5:4]=affinity, [3:2]=level, [1:0]=reserved(0)
-    uint8_t val = 0;
-    val |= ((info->mode & 0x03) << 6);
-    val |= ((info->affinity & 0x03) << 4);
-    val |= ((info->level & 0x03) << 2);
-    // bits 1:0 left as 0 (reserved)
-    return val;
-}
-
-// Stub functions for other modes
-static void mode_aura_loop(void) {
-    // Existing logic for MODE_AURA
-    struct bt_le_scan_param scan_param = {
-        .type = BT_LE_SCAN_TYPE_ACTIVE,
-        .options = BT_LE_SCAN_OPT_NONE,
-        .interval = 0x0010,
-        .window = 0x0010,
-    };
-    int err;
-    while (!mode_changed) {
-        // --- Scanning phase ---
-        uint32_t scan_jitter = sys_rand32_get() % (2 * SCAN_JITTER_MS + 1) - SCAN_JITTER_MS;
-        uint32_t scan_time = SCAN_INTERVAL_MS + scan_jitter;
-        err = bt_le_scan_start(&scan_param, scan_cb);
-        if (err) {
-            printk("Scan start failed: %d\n", err);
-        }
-        k_sleep(K_MSEC(scan_time));
-        bt_le_scan_stop();
-
-        // --- Advertising phase ---
-        adv_data[0] = encode_device_info(&device_info); // device_info byte as first byte
-        adv_data[1] = 0; // second byte can be reserved or used for future extension
-        struct bt_data dynamic_ad[] = {
-            BT_DATA(BT_DATA_MANUFACTURER_DATA, adv_data, 2),
-        };
-        uint32_t adv_jitter = sys_rand32_get() % (2 * ADV_JITTER_MS + 1) - ADV_JITTER_MS;
-        uint32_t adv_time = ADV_INTERVAL_MS + adv_jitter;
-        err = bt_le_adv_start(&adv_params, dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
-        if (err) {
-            printk("Adv start failed: %d\n", err);
-        }
-        k_sleep(K_MSEC(adv_time));
-        bt_le_adv_stop();
-    }
-}
-
-static void mode_device_loop(void) {
-    // Implements the flow chart logic for device mode using led_manager
-    set_led_state(LED_14, 0); // Device OFF (LED_1 OFF)
-    struct bt_le_scan_param scan_param = {
-        .type = BT_LE_SCAN_TYPE_ACTIVE,
-        .options = BT_LE_SCAN_OPT_NONE,
-        .interval = 0x0010,
-        .window = 0x0010,
-    };
-    int err;
-    while (!mode_changed) {
-        // Reset peer and level counts for this cycle
-        peer_count = 0;
-        memset(aura_level_count, 0, sizeof(aura_level_count));
-
-        // Scan for the duration of the cycle interval
-        uint32_t cycle_jitter = sys_rand32_get() % (2 * SCAN_JITTER_MS + 1) - SCAN_JITTER_MS;
-        uint32_t cycle_time = SCAN_INTERVAL_MS + cycle_jitter;
-        err = bt_le_scan_start(&scan_param, scan_cb);
-        if (err) {
-            printk("Scan start failed: %d\n", err);
-        }
-        k_sleep(K_MSEC(cycle_time));
-        bt_le_scan_stop();
-
-        // Count max level and number of peers at max level for each affinity
-        uint8_t max_level[3] = {0};
-        uint8_t peers_at_max_level[3] = {0};
-        uint8_t highest_level = 0;
-        for (int aff = 0; aff < 3; ++aff) {
-            for (int lvl = highest_level; lvl < 4; ++lvl) {
-                if (aura_level_count[aff][lvl] > 0) {
-                    max_level[aff] = lvl;
-                    peers_at_max_level[aff] = aura_level_count[aff][lvl];
-                    if (lvl > highest_level) {
-                        highest_level = lvl; // Update highest level found
-                    }
-                }
-            }
-        }
-
-        // Got any?
-        if (peers_at_max_level[AFFINITY_MAGIC] == 0 && peers_at_max_level[AFFINITY_TECHNO] == 0 && peers_at_max_level[AFFINITY_UNITY] == 0) {
-            set_led_state(LED_14, 0); // Keep OFF (LED_1 OFF)
-            continue;
-        }
-
-        uint8_t my_affinity = device_info.affinity;
-        uint8_t my_peers_at_highest = aura_level_count[my_affinity][highest_level];
-        // If my affinity has no peers at max level, turn off LED_1
-        if (my_peers_at_highest == 0) {
-            set_led_state(LED_14, 0); // Device OFF (LED_1 OFF)
-            continue;
-        }
-
-        for (int aff = 0; aff < 3; ++aff) {
-            // If my affinity has peers at max level, but not the most peers, turn off LED_1
-            if (aff != my_affinity && aura_level_count[aff][highest_level] > my_peers_at_highest) {
-                set_led_state(LED_14, 0); // Device OFF (LED_1 OFF)
-                continue;
-            }
-        }
-
-        // If we reach here, it means my affinity has the most peers at max level
-        // Turn on LED_1 to indicate device is active
-        set_led_state(LED_14, 1);
-        
-    }
-    // On exit, turn off LED_1
-    set_led_state(LED_14, 0);
-}
-
-static void mode_lvlup_token_loop(void) {
-    // TODO: Implement logic for MODE_LVLUP_TOKEN
-    while (!mode_changed) {
-        k_sleep(K_MSEC(100));
-    }
-}
-
-static void mode_none_loop(void) {
-    // Only scan for master advertisements that may change device_info
-    struct bt_le_scan_param scan_param = {
-        .type = BT_LE_SCAN_TYPE_ACTIVE,
-        .options = BT_LE_SCAN_OPT_NONE,
-        .interval = 0x0010,
-        .window = 0x0010,
-    };
-    int err;
-    while (!mode_changed) {
-        err = bt_le_scan_start(&scan_param, scan_cb);
-        if (err) {
-            printk("Scan start failed: %d\n", err);
-        }
-        // Scan for a while, then stop to allow mode change check
-        k_sleep(K_MSEC(500));
-        bt_le_scan_stop();
-        k_sleep(K_MSEC(100));
-    }
-}
-
-static void main_loop(void)
-{
-    operation_mode_t last_mode = device_info.mode;
-    mode_changed = false;
-    while (1) {
-        switch (device_info.mode) {
-            case MODE_AURA:
-                mode_aura_loop();
-                break;
-            case MODE_DEVICE:
-                mode_device_loop();
-                break;
-            case MODE_LVLUP_TOKEN:
-                mode_lvlup_token_loop();
-                break;
-            case MODE_NONE:
-            default:
-                mode_none_loop();
-                break;
-        }
-        // Check for mode change
-        if (device_info.mode != last_mode) {
-            mode_changed = true;
-            last_mode = device_info.mode;
-            mode_changed = false; // Reset for next loop
-        }
-    }
-}
-
 int main(void)
 {
     int err;
@@ -434,15 +437,6 @@ int main(void)
     if (init_flash() ) {
         int flash_error_bp = 1;
         return 1;
-    }
-
-    if (!device_is_ready(led.port)) {
-        printk("LED device not ready\n");
-        return 0;
-    }
-    if (gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE) < 0) {
-        printk("Failed to configure LED GPIO\n");
-        return 0;
     }
 
     /* Set a custom Bluetooth device name */

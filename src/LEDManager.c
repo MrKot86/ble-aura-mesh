@@ -27,10 +27,10 @@ static void led_thread_function(void *arg1, void *arg2, void *arg3)
         for (int i = 0; i < led_count; i++) {
             switch (leds[i].state) {
                 case LED_OFF:
-                    gpio_pin_set_dt(leds[i].gpio, GPIO_OUTPUT_INACTIVE);
+                    gpio_pin_set_dt(leds[i].gpio, 0);
                     break;
                 case LED_ON:
-                    gpio_pin_set_dt(leds[i].gpio, GPIO_OUTPUT_ACTIVE);
+                    gpio_pin_set_dt(leds[i].gpio, 1);
                     break;
                 case LED_BLINKING:
                     gpio_pin_toggle_dt(leds[i].gpio);
@@ -54,6 +54,7 @@ int init_led_manager(const struct gpio_dt_spec *const *led_array, int count, int
         leds[i].state = LED_OFF;
         if (!device_is_ready(led_array[i]->port)) return -2;
         if (gpio_pin_configure_dt(led_array[i], GPIO_OUTPUT_INACTIVE) < 0) return -3;
+        gpio_pin_set_dt(leds[i].gpio, 0);
     }
     k_thread_create(&led_thread_data, led_thread_stack,
                     K_THREAD_STACK_SIZEOF(led_thread_stack),
