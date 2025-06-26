@@ -63,12 +63,29 @@ static const struct bt_le_adv_param adv_params = {
     .peer = NULL,
 };
 
+static struct bt_le_scan_param scan_param = {
+    .type = BT_LE_SCAN_TYPE_PASSIVE,
+    .options = BT_LE_SCAN_OPT_NONE,
+    .interval = BT_GAP_SCAN_FAST_INTERVAL_MIN,
+    .window = BT_GAP_SCAN_FAST_WINDOW,
+};
+
 device_info_t device_info = {
     .mode = MODE_AURA,
     .affinity = AFFINITY_UNITY,
     .level = 0
 };
 static bool mode_changed = false;
+
+mode_device_state_t mode_device_state = {
+    .is_on = false
+};
+
+static struct led_entry led_array[LED_IDX_MAX] = {
+    { .state = LED_OFF, .gpio = &led },
+    { .state = LED_OFF, .gpio = &led14 },
+    { .state = LED_OFF, .gpio = &led15 }
+};  
 
 /******* Functions Declarations **************/
 // --- Utility and Helper Functions ---
@@ -171,7 +188,7 @@ static void set_mode_handlers(operation_mode_t mode) {
     switch (mode) {
         case MODE_AURA:
             current_zephyr_handler = handle_zephyr_aura;
-            current_end_of_cycle = end_of_cycle_aura;
+            current_end_of_cycle = end_of_cycle_device;
             break;
         case MODE_DEVICE:
             current_zephyr_handler = handle_zephyr_aura;
@@ -198,7 +215,7 @@ static void end_of_cycle_device(void) {
     uint8_t max_level[3] = {0};
     uint8_t peers_at_max_level[3] = {0};
     uint8_t highest_level = 0;
-    enum led_state led_state = LED_ON; // Default to ON
+    uint8_t new_device_state = 1; // Default to ON
     for (int aff = 0; aff < 3; ++aff) {
         for (int lvl = highest_level; lvl < 4; ++lvl) {
             if (aura_level_count[aff][lvl] > 0) {
@@ -216,14 +233,14 @@ static void end_of_cycle_device(void) {
 
     // Got any?
     if (peers_at_max_level[AFFINITY_MAGIC] == 0 && peers_at_max_level[AFFINITY_TECHNO] == 0 && peers_at_max_level[AFFINITY_UNITY] == 0) {
-        led_state = LED_OFF;
+        new_device_state = 0;
     } else if (my_peers_at_highest == 0) {
-        led_state = LED_OFF;
+        new_device_state = 0;
     } else {
         for (int aff = 0; aff < 3; ++aff) {
             // If my affinity has peers at max level, but not the most peers, turn off LED_1
             if (aff != my_affinity && aura_level_count[aff][highest_level] > my_peers_at_highest) {
-                led_state = LED_OFF;
+                new_device_state = 0;
                 break;
             }
         }
@@ -233,10 +250,13 @@ static void end_of_cycle_device(void) {
     peer_count = 0;
     memset(aura_level_count, 0, sizeof(aura_level_count));
 
-    // If we reach here, it means my affinity has the most peers at max level
-    // Turn on LED_1 to indicate device is active
-    set_led_state(ON_BOARD_LED, led_state);
+    if (new_device_state != mode_device_state.is_on) {
+        mode_device_state.is_on = new_device_state;
+        // Store new state in flash (ID 1)
+        set_led_state(ON_BOARD_LED, mode_device_state.is_on ? LED_ON : LED_OFF);
+    }    
 }
+
 static void end_of_cycle_lvlup_token(void) {
     // Token mode: implement any end-of-cycle logic
 }
@@ -312,38 +332,28 @@ static void main_loop(void)
     mode_changed = false;
     while (1) {
         // --- Scanning phase ---
-        struct bt_le_scan_param scan_param = {
-            .type = BT_LE_SCAN_TYPE_PASSIVE,
-            .options = BT_LE_SCAN_OPT_NONE,
-            .interval = 0x0010,
-            .window = 0x0010,
-        };
+
         int err;
-        uint32_t scan_jitter = sys_rand32_get() % (2 * SCAN_JITTER_MS + 1) - SCAN_JITTER_MS;
-        uint32_t scan_time = SCAN_INTERVAL_MS + scan_jitter;
         err = bt_le_scan_start(&scan_param, scan_cb);
         if (err) {
             printk("Scan start failed: %d\n", err);
         }
-        //k_sleep(K_MSEC(scan_time));
-        //bt_le_scan_stop();
-
         // --- Advertising phase ---
         // For mesh device:
         prepare_mesh_adv_data(/* state: 1=on, 0=off, etc. */ (device_info.mode == MODE_DEVICE ? /* your logic here */ 1 : 0));
         struct bt_data dynamic_ad[] = {
             BT_DATA(BT_DATA_MANUFACTURER_DATA, adv_data, MESH_ADV_LEN),
         };
-        uint32_t adv_jitter = sys_rand32_get() % (2 * ADV_JITTER_MS + 1) - ADV_JITTER_MS;
-        uint32_t adv_time = ADV_INTERVAL_MS + adv_jitter;
+
         err = bt_le_adv_start(&adv_params, dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
         if (err) {
             printk("Adv start failed: %d\n", err);
         }
-        //k_sleep(K_MSEC(adv_time));
-        k_sleep(K_MSEC(1000));
+        //k_sleep(K_MSEC(CYCLE_DURATION_MS));
+        operate_leds(CYCLE_DURATION_MS, BLINK_INTERVAL_MS); // Operate LEDs for 1.5 seconds, blink every 250ms
         bt_le_scan_stop();
         bt_le_adv_stop();
+        k_sleep(K_MSEC(100)); // Sleep for 100ms to allow any pending operations to complete
 
         // --- End of cycle handler ---
         current_end_of_cycle();
@@ -409,11 +419,9 @@ int main(void)
     int err;
 
     // Array of pointers to LED gpio_dt_spec
-    static const struct gpio_dt_spec *led_array[LED_IDX_MAX] = { &led, &led14, &led15 };
-    init_led_manager(led_array, LED_IDX_MAX, 1000); // 1 second interval, 3 LEDs
+    init_led_manager(led_array, LED_IDX_MAX); // 1 second interval, 3 LEDs
 
     if (init_flash() ) {
-        int flash_error_bp = 1;
         return 1;
     }
 
@@ -454,7 +462,10 @@ int main(void)
         printk("Loaded device_info from flash: mode=%d affinity=%d level=%d\n", device_info.mode, device_info.affinity, device_info.level);
     }
     
-    run_led_thread();
+    set_led_state(ON_BOARD_LED, LED_BLINKING); // Start with blinking LED
+    operate_leds(STARTUP_DELAY_MS, BLINK_INTERVAL_MS); // Operate LEDs for 5 second, blink every 250ms
+    set_led_state(ON_BOARD_LED, LED_OFF);
+
     main_loop();
     return 0;
 }

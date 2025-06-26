@@ -11,14 +11,17 @@
 #define MAC_LEN 6
 #define MAX_PEERS 255
 
-#define RSSI_THRESHOLD -45 // RSSI threshold for peer discovery
+#define RSSI_THRESHOLD -80 // RSSI threshold for peer discovery
 
 // --- Protocol/Format Length Defines ---
 #define MESH_ADV_LEN 6
 #define MASTER_ADV_LEN (2 + MAC_LEN + 3) // 2 prefix + MAC + 3 fields
 #define LEVELS_PER_AFFINITY 4
 
-// BLE scan/adv timing
+// Timings
+#define STARTUP_DELAY_MS 5000 // 5 seconds for startup timeout
+#define CYCLE_DURATION_MS 1500 // 1 second cycle duration
+#define BLINK_INTERVAL_MS 250 // 250ms blink interval for LEDs
 #define SCAN_INTERVAL_MS 701  // prime number, ~0.7s
 #define ADV_INTERVAL_MS 307   // prime number, ~0.3s
 #define SCAN_JITTER_MS 50     // up to +/-50ms random jitter

@@ -12,12 +12,19 @@ enum led_state {
     LED_BLINKING
 };
 
+// Internal LED state struct
+struct led_entry {
+    enum led_state state;
+    const struct gpio_dt_spec *gpio;
+};
+
+
 // Initialize with array of pointers to const struct gpio_dt_spec, and count
-int init_led_manager(const struct gpio_dt_spec *const *leds, int led_count, int interval_ms);
+int init_led_manager(const struct led_entry *led_array, int count);
 // Set state by index
 int set_led_state(int led_idx, enum led_state state);
 
-void run_led_thread(void);
+void operate_leds(int total_interval_ms, int blink_interval_ms);
 
 #ifdef __cplusplus
 }

@@ -32,11 +32,15 @@ typedef struct {
     uint8_t level; // 0, 1 or 2
 } device_info_t;
 
-
 typedef struct peer {
     uint8_t mac[6]; // MAC address
     uint8_t data; // 1st byte of manufacturer data 
 } peer_t;
+
+typedef struct {
+    uint8_t is_on;
+} mode_device_state_t;
+
 
 #ifdef __cplusplus
 }
