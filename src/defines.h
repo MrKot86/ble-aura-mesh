@@ -10,8 +10,11 @@
 // BLE/peer
 #define MAC_LEN 6
 #define MAX_PEERS 255
+#define HOSTILE_ENVIRONMENT_LEVEL 3 // Level for hostile environment
+#define HOSTILE_ENVIRONMENT_TRESHOLD 20 // Threshold for staying in hostile environment before becoming affected. 
 
 #define RSSI_THRESHOLD -80 // RSSI threshold for peer discovery
+#define LVLUP_TOKEN_RSSI_THRESHOLD -40 // RSSI threshold for level-up token discovery (really close)
 
 // --- Protocol/Format Length Defines ---
 #define MESH_ADV_LEN 6
@@ -26,5 +29,6 @@
 #define ADV_INTERVAL_MS 307   // prime number, ~0.3s
 #define SCAN_JITTER_MS 50     // up to +/-50ms random jitter
 #define ADV_JITTER_MS 30      // up to +/-30ms random jitter
+#define LVLUP_TOKEN_BROADCAST_COUNTDOWN 3 // Broadcast countdown for level-up token
 
 #endif // MODE_DEFS_H

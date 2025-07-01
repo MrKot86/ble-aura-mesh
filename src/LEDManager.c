@@ -6,9 +6,8 @@
 
 static struct led_entry *leds = NULL;
 static int led_count = 0;
-static int cycle_interval = 0;
 
-int init_led_manager(const struct led_entry *led_array, int count)
+int init_led_manager(struct led_entry *led_array, int count)
 {
     leds = led_array;
     if (!leds) return -1;

@@ -20,7 +20,7 @@ struct led_entry {
 
 
 // Initialize with array of pointers to const struct gpio_dt_spec, and count
-int init_led_manager(const struct led_entry *led_array, int count);
+int init_led_manager(struct led_entry *led_array, int count);
 // Set state by index
 int set_led_state(int led_idx, enum led_state state);
 
