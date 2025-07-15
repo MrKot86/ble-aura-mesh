@@ -9,7 +9,8 @@ extern "C" {
 enum led_state {
     LED_OFF,
     LED_ON,
-    LED_BLINKING
+    LED_BLINK_FAST,
+    LED_BLINK_ONCE
 };
 
 // Internal LED state struct

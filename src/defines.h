@@ -10,16 +10,13 @@
 // BLE/peer
 #define MAC_LEN 6
 #define MAX_PEERS 255
-#define HOSTILE_ENVIRONMENT_LEVEL 3 // Level for hostile environment
-#define HOSTILE_ENVIRONMENT_TRESHOLD 20 // Threshold for staying in hostile environment before becoming affected. 
 
-#define RSSI_THRESHOLD -80 // RSSI threshold for peer discovery
-#define LVLUP_TOKEN_RSSI_THRESHOLD -40 // RSSI threshold for level-up token discovery (really close)
+#define RSSI_THRESHOLD -70 // RSSI threshold for peer discovery
+#define LVLUP_TOKEN_RSSI_THRESHOLD -45 // RSSI threshold for level-up token discovery (really close)
 
 // --- Protocol/Format Length Defines ---
 #define MESH_ADV_LEN 6
 #define MASTER_ADV_LEN (2 + MAC_LEN + 3) // 2 prefix + MAC + 3 fields
-#define LEVELS_PER_AFFINITY 4
 
 // Timings
 #define STARTUP_DELAY_MS 5000 // 5 seconds for startup timeout
@@ -30,5 +27,14 @@
 #define SCAN_JITTER_MS 50     // up to +/-50ms random jitter
 #define ADV_JITTER_MS 30      // up to +/-30ms random jitter
 #define LVLUP_TOKEN_BROADCAST_COUNTDOWN 3 // Broadcast countdown for level-up token
+
+// --- Aura levels and stuff ---
+#define HOSTILE_AURAS_IDX 0 // Index for hostile auras in aura_level_count
+#define FRIENDLY_AURAS_IDX 1 // Index for Unity auras in aura_level_count
+#define MAX_AURA_LEVEL 3 // Maximum aura level (0 to 3)
+#define LEVELS_PER_AFFINITY 5 // Levels per affinity type (0, 1, 2, 3, 4 = hostile environment)
+#define HOSTILE_ENVIRONMENT_LEVEL 4 // Level for hostile environment
+#define HOSTILE_ENVIRONMENT_TRESHOLD 20 // Threshold for staying in hostile environment before becoming affected. 
+
 
 #endif // MODE_DEFS_H

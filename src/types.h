@@ -43,12 +43,12 @@ typedef enum {
 typedef struct {
     uint8_t mode; // operation_mode_t
     uint8_t affinity; // affinity_t
-    uint8_t level; // 0, 1 or 2, 3 = hostile environment
+    uint8_t level; // 0 to 3, 4 = hostile environment
 } device_info_t;
 
 typedef struct peer {
     uint8_t mac[6]; // MAC address
-    uint8_t data; // 1st byte of manufacturer data 
+    device_info_t peer_info; // Peer's parameters 
 } peer_t;
 
 typedef struct {
@@ -63,6 +63,7 @@ typedef struct {
 
 typedef struct {
     uint8_t mac[6]; // MAC address of receiving aura pendant
+    device_info_t device_info; // Device info to broadcast
     uint8_t broadcast_countdown; // Countdown for broadcasting
 } mode_lvlup_token_state_t;
 

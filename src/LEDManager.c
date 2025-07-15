@@ -32,7 +32,6 @@ int set_led_state(int led_idx, enum led_state state)
 void operate_leds(int total_interval_ms, int blink_interval_ms)
 {
     int elapsed = 0;
-    int blink_state = 0;
     // Synchronize state to new_state once at the start
     for (int i = 0; i < led_count; i++) {
         // set ONs and OFFs immediately
@@ -45,12 +44,18 @@ void operate_leds(int total_interval_ms, int blink_interval_ms)
 
     while (elapsed < total_interval_ms) {
         for (int i = 0; i < led_count; i++) {
-            if (leds[i].state == LED_BLINKING) {
+            if (leds[i].state == LED_BLINK_FAST) {
                 gpio_pin_toggle_dt(leds[i].gpio);
+            }
+            if (leds[i].state == LED_BLINK_ONCE) {
+                if (elapsed == 0) {
+                    gpio_pin_set_dt(leds[i].gpio, 1);
+                } else {
+                    gpio_pin_set_dt(leds[i].gpio, 0);
+                }
             }
         }
         k_sleep(K_MSEC(blink_interval_ms));
         elapsed += blink_interval_ms;
-        blink_state = !blink_state;
     }
 }
