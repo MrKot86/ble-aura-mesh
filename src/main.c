@@ -55,8 +55,8 @@ static struct bt_le_adv_param adv_params = {
     .sid = 0,
     .secondary_max_skip = 0,
     .options = BT_LE_ADV_OPT_USE_IDENTITY | BT_LE_ADV_OPT_USE_NAME,
-    .interval_min = BT_GAP_ADV_FAST_INT_MIN_2,
-    .interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
+    .interval_min = BT_GAP_ADV_SLOW_INT_MIN,
+    .interval_max = BT_GAP_ADV_SLOW_INT_MAX,
     .peer = NULL,
 };
 
@@ -85,10 +85,24 @@ static struct led_entry led_array[LED_IDX_MAX] = {
 };  
 
 /******* Functions Declarations **************/
+// --- Hash Table Functions ---
+static uint8_t hash_mac(const uint8_t *mac);
+static void count_peer(const uint8_t *mac, device_info_t *peer_info);
+static bool peer_exists(const uint8_t *mac);
+static void clear_peer_table(void);
+static void age_peers(void);
+static void age_overseer(void);
+static void track_overseer(void);
+static bool is_peer_valid_for_calculation(const peer_t *peer);
+static void count_stable_peers_for_calculations(void);
+
 // --- Utility and Helper Functions ---
 static void prepare_mesh_adv_data(uint8_t state);
 static void prepare_aura_mesh_adv_data(uint8_t state);
-static void count_peer(const bt_addr_le_t *addr, device_info_t *peer_info);
+static void prepare_overseer_adv_data(void);
+
+static void count_stable_peers_for_calculations(void);
+static void count_stable_peers_for_overseer_calculations(void);
 static uint8_t split_unity_level(uint8_t level, affinity_t target_affinity);
 #define TO_UNITY_LEVEL(magic_level, techno_level) \
     ((magic_level << 4) | (techno_level & 0x0F))
@@ -100,6 +114,7 @@ static void set_affinity_leds_state(enum led_state state);
 static void init_mode_aura(void);
 static void init_mode_device(void);
 static void init_mode_lvlup_token(void);
+static void init_mode_overseer(void);
 static void init_mode_none(void);
 
 // --- BLE Advertisement/Scan Handlers ---
@@ -108,11 +123,14 @@ static void handle_zephyr_device(const bt_addr_le_t *addr, device_info_t *peer_i
 static void handle_zephyr_aura(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi);
 static void handle_zephyr_none(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi);
 static void handle_zephyr_lvlup_token(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi);
+static void handle_zephyr_overseer(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi);
+static void handle_overseer_adv(const bt_addr_le_t *addr, const uint8_t *data, int8_t rssi);
 
 // --- End-of-Cycle Handlers ---
 static void end_of_cycle_aura(void);
 static void end_of_cycle_device(void);
 static void end_of_cycle_lvlup_token(void);
+static void end_of_cycle_overseer(void);
 static void end_of_cycle_none(void);
 
 // --- Mode/State Management ---
@@ -141,6 +159,141 @@ typedef void (*end_of_cycle_handler_t)(void);
 static zephyr_adv_handler_t current_zephyr_handler = handle_zephyr_none;
 static end_of_cycle_handler_t current_end_of_cycle = end_of_cycle_none;
 
+// --- Hash Table Implementation ---
+
+// XOR + shift hash function optimized for nRF51822
+static uint8_t hash_mac(const uint8_t *mac) {
+    uint8_t hash = 0;
+    for (int i = 0; i < MAC_LEN; i++) {
+        hash ^= mac[i];
+        hash = (hash << 1) | (hash >> 7); // Rotate left by 1
+    }
+    return hash; // Use full 8-bit range for 256 slots
+}
+
+// Count peer and store its information into the hash table
+// This function is called by the zephyr handlers to count unique peers and store their information
+static void count_peer(const uint8_t *mac, device_info_t *peer_info) {
+    if (peer_count >= MAX_PEERS) {
+        return; // Peer table is full, ignore this advertisement
+    }
+    uint8_t slot = hash_mac(mac);
+    uint8_t original_slot = slot;
+    uint8_t first_deleted = MAX_PEERS;
+    
+    do {
+        if (peers[slot].state == PEER_SLOT_EMPTY) {
+            // Use empty slot or first deleted slot if available
+            uint8_t target_slot = (first_deleted < MAX_PEERS) ? first_deleted : slot;
+            peers[target_slot].state = PEER_SLOT_OCCUPIED;
+            memcpy(peers[target_slot].mac, mac, MAC_LEN);
+            peers[target_slot].affinity = peer_info->affinity;
+            peers[target_slot].level = peer_info->level;
+            peers[target_slot].stability_counter = 1; // First detection
+            peers[target_slot].detected_this_cycle = 1;
+            peers[target_slot].is_established = 0; // Not yet established
+            peers[target_slot].reserved = 0;
+            peer_count++;
+            return;
+        }
+        
+        if (peers[slot].state == PEER_SLOT_DELETED && first_deleted == MAX_PEERS) {
+            first_deleted = slot; // Remember first deleted slot
+        }
+        
+        if (peers[slot].state == PEER_SLOT_OCCUPIED &&
+            memcmp(peers[slot].mac, mac, MAC_LEN) == 0) {
+            // Update existing peer - only if not already detected this cycle
+            if (!peers[slot].detected_this_cycle) {
+                peers[slot].affinity = peer_info->affinity;
+                peers[slot].level = peer_info->level;
+                peers[slot].detected_this_cycle = 1; // Mark as detected this cycle
+            }
+            return;
+        }
+        
+        // Linear probing with prime step
+        slot = (slot + HASH_PROBE_STEP) % MAX_PEERS;
+    } while (slot != original_slot);
+}
+
+// Check if a peer exists in the hash table
+static bool peer_exists(const uint8_t *mac) {
+    uint8_t slot = hash_mac(mac);
+    uint8_t original_slot = slot;
+    
+    do {
+        if (peers[slot].state == PEER_SLOT_EMPTY) {
+            return false; // Not found
+        }
+        
+        if (peers[slot].state == PEER_SLOT_OCCUPIED &&
+            memcmp(peers[slot].mac, mac, MAC_LEN) == 0) {
+            return true; // Found
+        }
+        
+        // Continue probing through deleted slots
+        slot = (slot + HASH_PROBE_STEP) % MAX_PEERS;
+    } while (slot != original_slot);
+    
+    return false; // Not found
+}
+
+// Clear the entire peer table
+static void clear_peer_table(void) {
+    for (int i = 0; i < MAX_PEERS; i++) {
+        peers[i].state = PEER_SLOT_EMPTY;
+        peers[i].stability_counter = 0;
+        peers[i].detected_this_cycle = 0;
+        peers[i].is_established = 0;
+        peers[i].reserved = 0;
+    }
+    peer_count = 0;
+}
+
+// Age peers based on detection flags and update stability counters
+static void age_peers(void) {
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (peers[i].state == PEER_SLOT_OCCUPIED) {
+            if (peers[i].detected_this_cycle) {
+                // Peer was detected this cycle
+                if (peers[i].stability_counter < 0) {
+                    peers[i].stability_counter = 1; // Reset to first detection after misses
+                } else if (peers[i].stability_counter < PEER_DETECTION_THRESHOLD) {
+                    peers[i].stability_counter++; // Increment consecutive detections
+                    
+                    // Mark as established once threshold is reached
+                    if (peers[i].stability_counter >= PEER_DETECTION_THRESHOLD) {
+                        peers[i].is_established = 1;
+                    }
+                }
+                peers[i].detected_this_cycle = 0; // Reset flag for next cycle
+            } else {
+                // Peer was not detected this cycle
+                if (peers[i].stability_counter > 0) {
+                    peers[i].stability_counter = -1; // Reset to first miss after detections
+                } else {
+                    peers[i].stability_counter--; // Increment consecutive misses (negative)
+                }
+                
+                // Remove peer if missed for PEER_MISS_THRESHOLD consecutive cycles
+                if (peers[i].stability_counter <= -PEER_MISS_THRESHOLD) {
+                    peers[i].state = PEER_SLOT_DELETED;
+                    peer_count--;
+                }
+            }
+        }
+    }
+}
+
+// Check if peer should be included in calculations
+// Peer is valid once it has been established (reached PEER_DETECTION_THRESHOLD)
+static bool is_peer_valid_for_calculation(const peer_t *peer) {
+    return (peer->state == PEER_SLOT_OCCUPIED && peer->is_established);
+}
+
+// --- End Hash Table Implementation ---
+
 // Split unity level into magic and techno components
 // For Unity, it returns the biggest part
 static uint8_t split_unity_level(uint8_t level, affinity_t target_affinity) {
@@ -150,6 +303,9 @@ static uint8_t split_unity_level(uint8_t level, affinity_t target_affinity) {
         return (level >> 4) & 0x0F;
     case AFFINITY_TECHNO:
         return level & 0x0F;
+    case AFFINITY_UNITY:
+    default:
+        break;
     }
     uint8_t magic_level = (level >> 4) & 0x0F; // Magic part
     uint8_t techno_level = level & 0x0F; // Techno part
@@ -162,15 +318,16 @@ static void init_mode_aura(void) {
     mode_state.aura.is_active = 1; // Example: set aura as active by default
     // Set other aura state fields as needed
 
-    prepare_mesh_adv_data(mode_state.aura.hostility_counter);
+    prepare_mesh_adv_data(mode_state.aura.is_active);
     set_affinity_leds_state(LED_ON); // Set LEDs to ON initially
-    adv_params.interval_min = BT_GAP_ADV_FAST_INT_MIN_2;
-    adv_params.interval_max = BT_GAP_ADV_FAST_INT_MAX_2;
+    // Use slower intervals for high peer density environments
+    adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
+    adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
 }
 
 static void handle_zephyr_aura(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi) {
     // Only process peers advertising MODE_AURA
-    if (peer_info->mode != MODE_AURA) {
+    if (peer_info->mode != MODE_AURA || ! state) {
         return; // Only interested in AURA mode
     }
     if (unlikely(peer_info->level == HOSTILE_ENVIRONMENT_LEVEL &&
@@ -192,7 +349,7 @@ static void end_of_cycle_aura(void) {
             // Blink LEDs to indicate active aura mode
             set_affinity_leds_state(LED_BLINK_FAST);
             mode_state.aura.is_active = 0; // Disable aura
-            prepare_aura_mesh_adv_data(mode_state.aura.hostility_counter);
+            prepare_aura_mesh_adv_data(mode_state.aura.is_active);
         }
         mode_state.aura.is_in_hostile_environment = 0; // Reset hostile environment state
     } else if (mode_state.aura.hostility_counter > 0) {
@@ -201,7 +358,7 @@ static void end_of_cycle_aura(void) {
         if (mode_state.aura.hostility_counter == 0) {
             set_affinity_leds_state(LED_ON);
             mode_state.aura.is_active = 1; // Enable aura
-            prepare_aura_mesh_adv_data(mode_state.aura.hostility_counter);
+            prepare_aura_mesh_adv_data(mode_state.aura.is_active);
         }
     }
 }
@@ -209,51 +366,128 @@ static void end_of_cycle_aura(void) {
 // --- MODE_DEVICE handlers ---
 static void init_mode_device(void) {
     memset(&mode_state, 0, sizeof(mode_state));
-    mode_state.device.is_on = 0; // Example: device starts off
-    // Set other device state fields as needed
+    mode_state.device.is_on = device_info.level ? 0 : 1; // Example: device starts off
+    // Clear overseer tracking
+    memset(mode_state.device.overseer_mac, 0, MAC_LEN);
+    mode_state.device.overseer_rssi = -127; // Minimum RSSI
+    mode_state.device.overseer_stability_counter = 0;
+    mode_state.device.overseer_detected_this_cycle = 0;
+    mode_state.device.overseer_state = 0;
+    mode_state.device.use_overseer = 0;
 
     prepare_mesh_adv_data(mode_state.device.is_on);
-    set_affinity_leds_state(LED_BLINK_ONCE); // Set LEDs to blink once initially
+    set_affinity_leds_state(device_info.level ? LED_BLINK_ONCE : LED_ON); // Set LEDs according to level
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
 }
 
 static void handle_zephyr_device(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi){
     // Only process peers advertising MODE_AURA
-    if (peer_info->mode != MODE_AURA) {
+    if (peer_info->mode != MODE_AURA || ! state ) {
         return; // Only interested in AURA mode
     }
 
-    count_peer(addr, peer_info);
+    count_peer(addr->a.val, peer_info);
+}
+
+static void age_overseer()
+{
+    if (mode_state.device.overseer_stability_counter > 0)
+    {
+        mode_state.device.overseer_stability_counter = -1; // Reset to first miss
+    }
+    else
+    {
+        mode_state.device.overseer_stability_counter--; // Increment consecutive misses
+    }
+
+    // Stop using overseer if missed for too long
+    if (mode_state.device.overseer_stability_counter <= -OVERSEER_MISS_THRESHOLD)
+    {
+        mode_state.device.use_overseer = 0;
+        memset(mode_state.device.tracked_mac, 0, MAC_LEN);
+        mode_state.device.overseer_rssi = -127;
+    }
+}
+
+static void track_overseer() {
+    // Age overseer tracking
+    if ( ! mode_state.device.overseer_detected_this_cycle) {
+        age_overseer();
+        return; // Overseer was not detected this cycle
+    }
+    // Overseer was detected this cycle
+    mode_state.device.overseer_detected_this_cycle = 0; // Reset flag
+    if ( ! mode_state.device.use_overseer ) {
+        // If overseer is not used, we track the strongest one
+        memcpy(mode_state.device.tracked_mac, mode_state.device.overseer_mac, MAC_LEN);
+        mode_state.device.overseer_stability_counter = 1; // Set to first detection
+        return;
+    }
+
+
+    if ( ! memcmp(mode_state.device.overseer_mac, mode_state.device.tracked_mac, MAC_LEN) ) {
+        // If overseer is our tracked one, update stability counter
+        if (mode_state.device.overseer_stability_counter < 0) {
+            mode_state.device.overseer_stability_counter = 1; // Reset to first detection
+        } else if (mode_state.device.overseer_stability_counter < OVERSEER_DETECTION_THRESHOLD) {
+            mode_state.device.overseer_stability_counter++; // Increment consecutive detections
+            
+            // Start using overseer once threshold is reached
+            if (mode_state.device.overseer_stability_counter >= OVERSEER_DETECTION_THRESHOLD) {
+                mode_state.device.use_overseer = 1;
+                memcpy(mode_state.device.tracked_mac, mode_state.device.overseer_mac, MAC_LEN);
+            }
+        }
+        return; 
+    }
+    // If overseer is not our tracked one, age it
+    age_overseer();
+    // If not tracking overseer after aging, start tracking the new one
+    if ( ! mode_state.device.use_overseer ) {
+        memcpy(mode_state.device.tracked_mac, mode_state.device.overseer_mac, MAC_LEN);
+        mode_state.device.overseer_stability_counter = 1; // Set to first detection
+    }
+      
 }
 
 static void end_of_cycle_device(void) {
-    // Count max level and number of peers at max level for each affinity
-    uint8_t new_device_state = 0; // Default to OFF
-    for ( int level = HOSTILE_ENVIRONMENT_LEVEL ; level >= device_info.level; --level ) {
-        if (aura_level_count[HOSTILE_AURAS_IDX][level] == 0 &&
-            aura_level_count[FRIENDLY_AURAS_IDX][level] == 0) {
-            continue; // No peers at this level, skip
-        }
-        // Check if there more or equal friendly auras than hostile auras at this level
-        if (aura_level_count[FRIENDLY_AURAS_IDX][level] >= aura_level_count[HOSTILE_AURAS_IDX][level]) {
-            // If friendly auras are equal or more than hostile, keep device ON
-            new_device_state = 1;
-            break; // Found a level where device can stay ON
-        } else {
-            // If hostile auras are more, turn device OFF
-            new_device_state = 0;
-            break;
+    // Age all peers (increment miss counters, remove old peers)
+    age_peers();
+    
+    track_overseer();
+    
+    uint8_t new_device_state;
+    
+    if (mode_state.device.use_overseer) {
+        // Use overseer-commanded state
+        new_device_state = mode_state.device.overseer_state;
+    } else {
+        // Count only stable peers (detected 3+ consecutive times) for calculations
+        count_stable_peers_for_calculations();
+        
+        // Count max level and number of peers at max level for each affinity
+        new_device_state = device_info.level ? 0 : 1; // Default to OFF except if level is 0
+        for ( int level = HOSTILE_ENVIRONMENT_LEVEL ; level >= device_info.level; --level ) {
+            if (aura_level_count[HOSTILE_AURAS_IDX][level] == 0 &&
+                aura_level_count[FRIENDLY_AURAS_IDX][level] == 0) {
+                continue; // No peers at this level, skip
+            }
+            // Check if there more or equal friendly auras than hostile auras at this level
+            if (aura_level_count[FRIENDLY_AURAS_IDX][level] >= aura_level_count[HOSTILE_AURAS_IDX][level]) {
+                // If friendly auras are equal or more than hostile, keep device ON
+                new_device_state = 1;
+                break; // Found a level where device can stay ON
+            } else {
+                // If hostile auras are more, turn device OFF
+                new_device_state = 0;
+                break;
+            }
         }
     }
-   
-    // Reset peer and level counts for this cycle
-    peer_count = 0;
-    memset(aura_level_count, 0, sizeof(aura_level_count));
 
     if (new_device_state != mode_state.device.is_on) {
         mode_state.device.is_on = new_device_state;
-        // Store new state in flash (ID 1)
         set_affinity_leds_state(mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
         prepare_mesh_adv_data(mode_state.device.is_on);
     }    
@@ -378,6 +612,47 @@ static void end_of_cycle_lvlup_token(void) {
     }
 }
 
+// --- MODE_OVERSEER handlers ---
+static void init_mode_overseer(void) {
+    memset(&mode_state, 0, sizeof(mode_state));
+    mode_state.overseer.broadcast_countdown = OVERSEER_BROADCAST_COUNTDOWN;
+    // Overseer needs to see all auras as neutral to count them properly
+    // Keep original level and affinity for proper peer classification
+    
+    prepare_overseer_adv_data();
+    set_affinity_leds_state(LED_BLINK_FAST); // Indicate overseer mode with fast blinking
+    adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
+    adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
+}
+
+static void handle_zephyr_overseer(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi) {
+    // Only process peers advertising MODE_AURA
+    if (peer_info->mode != MODE_AURA || !state) {
+        return; // Only interested in active AURA mode
+    }
+
+    count_peer(addr->a.val, peer_info);
+}
+
+static void end_of_cycle_overseer(void) {
+    // Age all peers (increment miss counters, remove old peers)
+    age_peers();
+    
+    // Note: Peer counting for overseer calculations is done within prepare_overseer_adv_data()
+    // for each affinity perspective separately
+    
+    if (mode_state.overseer.broadcast_countdown > 0) {
+        mode_state.overseer.broadcast_countdown--;
+        if (mode_state.overseer.broadcast_countdown == 0) {
+            // Reset countdown for next cycle
+            mode_state.overseer.broadcast_countdown = OVERSEER_BROADCAST_COUNTDOWN;
+            
+            // Prepare overseer advertisement data
+            prepare_overseer_adv_data();
+        }
+    }
+}
+
 // --- MODE_NONE handlers ---
 static void init_mode_none(void) {
     memset(&mode_state, 0, sizeof(mode_state));
@@ -416,35 +691,82 @@ static void handle_master_adv(const bt_addr_le_t *addr, const uint8_t *target_ma
     }
 }
 
-// Count peer and store its information
-// This function is called by the zephyr handlers to count unique peers and store their information
-static void count_peer(const bt_addr_le_t *addr, device_info_t *peer_info) {
-    if (peer_count >= MAX_PEERS) {
-        return; // Peer list is full, ignore this advertisement
+// Handle overseer advertisements in device mode
+static void handle_overseer_adv(const bt_addr_le_t *addr, const uint8_t *data, int8_t rssi) {
+    // Only process in device mode
+    if (device_info.mode != MODE_DEVICE) {
+        return;
     }
+    
+    // Check if this overseer is stronger than current one or if no overseer tracked
+    if (rssi > mode_state.device.overseer_rssi || 
+        memcmp(mode_state.device.overseer_mac, addr->a.val, MAC_LEN) == 0) {
+        
+        // Update overseer tracking
+        memcpy(mode_state.device.overseer_mac, addr->a.val, MAC_LEN);
+        mode_state.device.overseer_rssi = rssi;
+        mode_state.device.overseer_detected_this_cycle = 1;
+        
+        // Extract state for this device's affinity and level
+        uint8_t commanded_state = 0;
+        if (device_info.affinity == AFFINITY_MAGIC && device_info.level >= 0 && device_info.level <= 3) {
+            commanded_state = data[device_info.level]; // Magic levels at positions 0, 1, 2, 3 in data (after header)
+        } else if (device_info.affinity == AFFINITY_TECHNO && device_info.level >= 0 && device_info.level <= 3) {
+            commanded_state = data[device_info.level + 4]; // Techno levels at positions 4, 5, 6, 7 in data
+        } else if (device_info.affinity == AFFINITY_UNITY && device_info.level >= 0 && device_info.level <= 3) {
+            // For Unity, use the better of magic or techno state for this level
+            uint8_t magic_state = data[device_info.level];
+            uint8_t techno_state = data[device_info.level + 4];
+            commanded_state = (magic_state || techno_state) ? 1 : 0;
+        }
+        
+        mode_state.device.overseer_state = commanded_state;
+    }
+}
 
-    // Check if MAC is already in peers array
-    for (uint8_t i = 0; i < peer_count; ++i) {
-        if (memcmp(addr->a.val, peers[i].mac, MAC_LEN) == 0) {
-            return; // MAC already exists, ignore this advertisement
+// Count stable peers for device state calculations
+// Only includes peers detected for PEER_DETECTION_THRESHOLD consecutive cycles
+static void count_stable_peers_for_calculations(void) {
+    // Reset level counts
+    memset(aura_level_count, 0, sizeof(aura_level_count));
+    
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (is_peer_valid_for_calculation(&peers[i])) {
+            // Maintain counts of levels for each affinity type using matrix
+            if (peers[i].affinity == AFFINITY_UNITY) {
+                // Unity is the only affinity that can be friendly to all levels
+                aura_level_count[FRIENDLY_AURAS_IDX][split_unity_level(peers[i].level, device_info.affinity)]++;
+            } else if (peers[i].affinity == device_info.affinity &&
+                peers[i].level <= MAX_AURA_LEVEL) { 
+                aura_level_count[FRIENDLY_AURAS_IDX][peers[i].level]++;
+            } else if (device_info.affinity != AFFINITY_UNITY) {
+                // Unity is the only affinity that has no hostile auras
+                // If the peer's affinity is not friendly, count it as hostile
+                aura_level_count[HOSTILE_AURAS_IDX][peers[i].level]++;
+            }
         }
     }
-    // Store peer info in peers array
-    memcpy(peers[peer_count].mac, addr->a.val, MAC_LEN);
-    peers[peer_count].peer_info = *peer_info;
-    peer_count++;
+}
+
+// Count stable peers for overseer calculations from a specific affinity perspective
+// This allows overseer to calculate states for each affinity independently
+static void count_stable_peers_for_overseer_calculations(void) {
+    // Reset level counts
+    memset(aura_level_count, 0, sizeof(aura_level_count));
     
-    // Maintain counts of levels for each affinity type using matrix
-    if ( peer_info->affinity == AFFINITY_UNITY ) {
-        // Unity is the only affinity that can be friendly to all levels
-        aura_level_count[FRIENDLY_AURAS_IDX][split_unity_level(peer_info->level, device_info.affinity)]++;
-    } else if ( peer_info->affinity == device_info.affinity &&
-        peer_info->level <= MAX_AURA_LEVEL ) { 
-        aura_level_count[FRIENDLY_AURAS_IDX][peer_info->level]++;
-    } else if ( device_info.affinity != AFFINITY_UNITY ) {
-        // Unity is the only affinity that has no hostile auras
-        // If the peer's affinity is not friendly, count it as hostile
-        aura_level_count[HOSTILE_AURAS_IDX][peer_info->level]++;
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (is_peer_valid_for_calculation(&peers[i])) {
+            // Maintain counts of levels for each affinity type using matrix
+            if (peers[i].affinity == AFFINITY_MAGIC) {
+                aura_level_count[MAGIC_AURAS_IDX][peers[i].level]++;
+            } else if (peers[i].affinity == AFFINITY_TECHNO) { 
+                aura_level_count[TECHNO_AURAS_IDX][peers[i].level]++;
+            } else {
+                // Then it must be Unity
+                aura_level_count[MAGIC_AURAS_IDX][split_unity_level(peers[i].level, AFFINITY_MAGIC)]++;
+                aura_level_count[TECHNO_AURAS_IDX][split_unity_level(peers[i].level, AFFINITY_TECHNO)]++;
+            }
+        }
     }
 }
 
@@ -469,6 +791,11 @@ static void set_mode(operation_mode_t mode) {
             current_end_of_cycle = end_of_cycle_lvlup_token;
             init_mode_lvlup_token();
             break;
+        case MODE_OVERSEER:
+            current_zephyr_handler = handle_zephyr_overseer;
+            current_end_of_cycle = end_of_cycle_overseer;
+            init_mode_overseer();
+            break;
         case MODE_NONE:
         default:
             current_zephyr_handler = handle_zephyr_none;
@@ -477,8 +804,8 @@ static void set_mode(operation_mode_t mode) {
             break;
     }
     mode_changed = false;
-    // Reset peer count and aura level counts and LED states
-    peer_count = 0;
+    // Reset peer table and aura level counts and LED states
+    clear_peer_table();
     memset(aura_level_count, 0, sizeof(aura_level_count));
 }
 
@@ -523,6 +850,9 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         uint8_t level = mfg[4 + MAC_LEN];
         // Call master handler (pass addr, target_mac, mode, affinity, level, rssi)
         handle_master_adv(addr, target_mac, mode, affinity, level, rssi);
+    } else if (mfg_len >= OVERSEER_ADV_LEN && mfg[0] == 0xDE && mfg[1] == 0xAD) {
+        // Overseer advertisement
+        handle_overseer_adv(addr, &mfg[2], rssi);
     }
 }
 
@@ -544,14 +874,73 @@ static void prepare_aura_mesh_adv_data(uint8_t state) {
     adv_data[1] = 0xFA;
     adv_data[2] = device_info.mode;
     adv_data[3] = device_info.affinity;
-    if ( mode_state.aura.is_active ) {
-        adv_data[4] = device_info.level; // Use device level if aura is active
-    } else {
-        adv_data[4] = 0; // Use 0 if aura is not active
-    }
+    adv_data[4] = device_info.level;
     adv_data[5] = state;
     // The rest of adv_data is unused for mesh adv (MESH_ADV_LEN bytes only)
     dynamic_ad[0].data_len = MESH_ADV_LEN;
+}
+
+// Prepare overseer advertisement data: [0xDE, 0xAD, states_for_each_level_and_affinity]
+// Format: [header] [magic_lvl0] [magic_lvl1] [magic_lvl2] [magic_lvl3] [techno_lvl0] [techno_lvl1] [techno_lvl2] [techno_lvl3]
+// Each byte contains states for that level/affinity combination using same logic as device mode
+static void prepare_overseer_adv_data(void) {
+    adv_data[0] = 0xDE;
+    adv_data[1] = 0xAD;
+
+    // set default states for all levels
+    memset(adv_data + 2, 0, 8); // Magic and Techno levels
+    adv_data[2] = 1; // Magic level 0 ON
+    adv_data[6] = 1; // Techno level 0 ON
+
+    dynamic_ad[0].data_len = OVERSEER_ADV_LEN;
+    
+    // Calculate device states for Magic affinity devices (levels 0-3)
+    count_stable_peers_for_overseer_calculations();
+
+    int deciding_level = HOSTILE_ENVIRONMENT_LEVEL;
+
+    for ( ; deciding_level > 0; --deciding_level) {
+        if (aura_level_count[MAGIC_AURAS_IDX][deciding_level] == 0 &&
+            aura_level_count[TECHNO_AURAS_IDX][deciding_level] == 0) {
+            continue; // No peers at this level, skip
+        }
+        break; // Found a level with peers
+    }
+
+    if (deciding_level <= 0) {
+        // No peers at any level, leave default states
+        return;
+    }
+
+    if (deciding_level == HOSTILE_ENVIRONMENT_LEVEL) {
+        if ( aura_level_count[MAGIC_AURAS_IDX][HOSTILE_ENVIRONMENT_LEVEL] ) {
+            // If there are magic auras at hostile level, turn all techno devices OFF
+            adv_data[6] = 0; // Techno levels OFF
+        }
+        if ( aura_level_count[TECHNO_AURAS_IDX][HOSTILE_ENVIRONMENT_LEVEL] ) {
+            // If there are techno auras at hostile level, turn all magic devices OFF
+            adv_data[2] = 0; // Magic levels OFF
+        }
+        return;
+    }
+
+    // Calculate which affinity has more peers at the deciding level
+    for ( int i = deciding_level; i >= 0; --i) {
+        // Check values for both Magic and Techno auras at deciding_level
+        if (aura_level_count[MAGIC_AURAS_IDX][deciding_level] > aura_level_count[TECHNO_AURAS_IDX][deciding_level]) {
+            // If magic auras are more, turn magic devices ON and techno devices OFF
+            adv_data[2 + i] = 1; // Magic levels OFF
+            adv_data[6 + i] = 0; // Techno levels OFF
+        } else if (aura_level_count[TECHNO_AURAS_IDX][deciding_level] > aura_level_count[MAGIC_AURAS_IDX][deciding_level]) {
+            // If techno auras are more, turn techno devices ON and magic devices OFF
+            adv_data[2 + i] = 0; // Magic levels OFF
+            adv_data[6 + i] = 1; // Techno levels OFF
+        } else {
+            // If equal, turn both ON
+            adv_data[2 + i] = 1; // Magic levels ON
+            adv_data[6 + i] = 1; // Techno levels ON
+        }
+    }
 }
 
 // Generate a static random MAC address
@@ -566,28 +955,37 @@ static void generate_static_random_addr(bt_addr_le_t *addr)
 }
 
 // --- Unified main loop ---
+// Optimized for high peer density (120-130 peers) with:
+// - 5 second scan cycles (vs 1.5s)
+// - Slow advertisement intervals (1000ms vs 20-30ms)
+// - Random jitter between scan start and advertisement start to maximize scanning window
 static void main_loop(void)
 {
     set_mode(device_info.mode);
     while (1) {
         // --- Scanning phase ---
-
         int err;
         err = bt_le_scan_start(&scan_param, scan_cb);
         if (err) {
             printk("Scan start failed: %d\n", err);
         }
-        // --- Advertising phase ---
         
-
+        // Add random jitter to maximize scanning window before advertising
+        // This allows more time to discover peers before adding RF noise
+        uint32_t jitter_ms = sys_rand32_get() % PEER_DISCOVERY_JITTER_MS;
+        operate_leds(jitter_ms, jitter_ms); // Random delay using LED operation
+        
+        // --- Advertising phase ---
         err = bt_le_adv_start(&adv_params, dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
         if (err) {
             printk("Adv start failed: %d\n", err);
         }
-        operate_leds(CYCLE_DURATION_MS, BLINK_INTERVAL_MS); // Operate LEDs for 1.5 seconds, blink every 250ms
+        
+        // Continue scanning and advertising for the remaining cycle time
+        operate_leds(CYCLE_DURATION_MS - jitter_ms, BLINK_INTERVAL_MS);
         bt_le_scan_stop();
         bt_le_adv_stop();
-        k_sleep(K_MSEC(100)); // Sleep for 100ms to allow any pending operations to complete
+        operate_leds(100, BLINK_INTERVAL_MS); // 100ms delay to allow pending operations to complete
 
         // --- End of cycle handler ---
         current_end_of_cycle();
@@ -662,6 +1060,9 @@ int main(void)
     if (init_flash() ) {
         return 1;
     }
+
+    // Initialize peer hash table
+    clear_peer_table();
 
     /* Try to read static address from flash */
     err = nvs_read(&fs, NVS_ID_STATIC_ADDR, &static_addr, sizeof(static_addr));
