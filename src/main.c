@@ -319,7 +319,9 @@ static void init_mode_aura(void) {
     // Set other aura state fields as needed
 
     prepare_mesh_adv_data(mode_state.aura.is_active);
-    set_affinity_leds_state(LED_ON); // Set LEDs to ON initially
+    set_led_state(AURA_STATE_OK_LED, LED_ON); // Set LEDs to ON initially
+    set_led_state(AURA_PROBLEM_LED, LED_OFF); // Set problem LED off initially
+    set_led_state(ON_BOARD_LED, LED_ON); // Set on-board LED to ON
     // Use slower intervals for high peer density environments
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
@@ -332,7 +334,7 @@ static void handle_zephyr_aura(const bt_addr_le_t *addr, device_info_t *peer_inf
     }
     if (unlikely(peer_info->level == HOSTILE_ENVIRONMENT_LEVEL &&
         peer_info->affinity != device_info.affinity && 
-        peer_info->affinity != AFFINITY_UNITY)) {
+        device_info.affinity != AFFINITY_UNITY)) {
         mode_state.aura.is_in_hostile_environment = 1;
         return;
     }
@@ -343,11 +345,16 @@ static void end_of_cycle_aura(void) {
         if ( mode_state.aura.hostility_counter < HOSTILE_ENVIRONMENT_TRESHOLD ) {
             // If in hostile environment, increase hostility counter
             mode_state.aura.hostility_counter++;
+            set_led_state(ON_BOARD_LED, mode_state.aura.is_active);
+            set_led_state(AURA_STATE_OK_LED, mode_state.aura.is_active);
+            set_led_state(AURA_PROBLEM_LED, mode_state.aura.is_active ? LED_BLINK_ONCE : LED_ON);
         }
-        // Aura mode: check if hostility counter is high, if so, BLink LEDs
+        // Aura mode: check if hostility counter is high, if so, blink LEDs
         if (mode_state.aura.hostility_counter >= HOSTILE_ENVIRONMENT_TRESHOLD) {
             // Blink LEDs to indicate active aura mode
-            set_affinity_leds_state(LED_BLINK_FAST);
+            set_led_state(ON_BOARD_LED, LED_OFF);
+            set_led_state(AURA_STATE_OK_LED, LED_OFF);
+            set_led_state(AURA_PROBLEM_LED, LED_ON);
             mode_state.aura.is_active = 0; // Disable aura
             prepare_aura_mesh_adv_data(mode_state.aura.is_active);
         }
@@ -356,9 +363,14 @@ static void end_of_cycle_aura(void) {
         mode_state.aura.hostility_counter--;
         // If hostility counter is zero, SET LEDs back to ON
         if (mode_state.aura.hostility_counter == 0) {
-            set_affinity_leds_state(LED_ON);
+            set_led_state(ON_BOARD_LED, LED_ON);
+            set_led_state(AURA_STATE_OK_LED, LED_ON);
+            set_led_state(AURA_PROBLEM_LED, LED_OFF);
             mode_state.aura.is_active = 1; // Enable aura
             prepare_aura_mesh_adv_data(mode_state.aura.is_active);
+        } else {
+            set_led_state(ON_BOARD_LED, LED_BLINK_ONCE);
+            set_led_state(AURA_STATE_OK_LED, LED_BLINK_ONCE);
         }
     }
 }
@@ -375,8 +387,13 @@ static void init_mode_device(void) {
     mode_state.device.overseer_state = 0;
     mode_state.device.use_overseer = 0;
 
+    set_led_state(ON_BOARD_LED, 
+        mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
+    set_led_state(DEVICE_STATE_OK_LED, 
+        mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
+    set_led_state(DEVICE_OUTPUT_PIN, mode_state.device.is_on);
+
     prepare_mesh_adv_data(mode_state.device.is_on);
-    set_affinity_leds_state(device_info.level ? LED_BLINK_ONCE : LED_ON); // Set LEDs according to level
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
 }
@@ -488,7 +505,12 @@ static void end_of_cycle_device(void) {
 
     if (new_device_state != mode_state.device.is_on) {
         mode_state.device.is_on = new_device_state;
-        set_affinity_leds_state(mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
+        set_led_state(ON_BOARD_LED, 
+            mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
+        set_led_state(DEVICE_STATE_OK_LED, 
+            mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
+        set_led_state(DEVICE_OUTPUT_PIN, 
+            mode_state.device.is_on);
         prepare_mesh_adv_data(mode_state.device.is_on);
     }    
 }
@@ -620,7 +642,8 @@ static void init_mode_overseer(void) {
     // Keep original level and affinity for proper peer classification
     
     prepare_overseer_adv_data();
-    set_affinity_leds_state(LED_BLINK_FAST); // Indicate overseer mode with fast blinking
+    set_led_state(ON_BOARD_LED, LED_BLINK_ONCE); // Set LEDs to blink once initially
+    set_led_state(LED_14, LED_BLINK_ONCE);
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
 }
