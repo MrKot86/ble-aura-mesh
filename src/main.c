@@ -18,15 +18,20 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/fs/nvs.h>
 #include <zephyr/random/random.h>
+#include <zephyr/sys/reboot.h>
 
 #include "LEDManager.h"
 #include "types.h"
 #include "defines.h"
 
 #define LED_NODE DT_ALIAS(led0)  // Maps to 'led0' in your board's device tree
-#define LED_14_NODE DT_ALIAS(led14)  // Maps to 'led0' in your board's device tree
-#define LED_15_NODE DT_ALIAS(led15)  // Maps to 'led0' in your board's device tree
+#define LED_12_NODE DT_ALIAS(led12)  // Maps to 'led12' in your board's device tree
+#define LED_13_NODE DT_ALIAS(led13)  // Maps to 'led13' in your board's device tree
+#define LED_14_NODE DT_ALIAS(led14)  // Maps to 'led14' in your board's device tree
+#define LED_15_NODE DT_ALIAS(led15)  // Maps to 'led15' in your board's device tree
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
+static const struct gpio_dt_spec led12 = GPIO_DT_SPEC_GET(LED_12_NODE, gpios);
+static const struct gpio_dt_spec led13 = GPIO_DT_SPEC_GET(LED_13_NODE, gpios);
 static const struct gpio_dt_spec led14 = GPIO_DT_SPEC_GET(LED_14_NODE, gpios);
 static const struct gpio_dt_spec led15 = GPIO_DT_SPEC_GET(LED_15_NODE, gpios);
 
@@ -74,14 +79,17 @@ static bool mode_changed = false;
 device_info_t device_info = {
     .mode = MODE_NONE,
     .affinity = AFFINITY_UNITY,
-    .level = 0
+    .level = 0,
+    .dynamic_rssi_threshold = 0 // 0 = disabled, use default RSSI_THRESHOLD
 };
 
 // LED Management
 static struct led_entry led_array[LED_IDX_MAX] = {
-    { .state = LED_OFF, .gpio = &led },
-    { .state = LED_OFF, .gpio = &led14 },
-    { .state = LED_OFF, .gpio = &led15 }
+    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led },       // On-board LED (normal)
+    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led12 },     // LED 12 (inverted)
+    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led13 },   // LED 13 (inverted)
+    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led14 },     // LED 14 (normal)
+    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led15 }      // LED 15 (normal)
 };  
 
 /******* Functions Declarations **************/
@@ -100,15 +108,13 @@ static void count_stable_peers_for_calculations(void);
 static void prepare_mesh_adv_data(uint8_t state);
 static void prepare_aura_mesh_adv_data(uint8_t state);
 static void prepare_overseer_adv_data(void);
+static bool check_dynamic_rssi_threshold(int8_t rssi);
 
 static void count_stable_peers_for_calculations(void);
 static void count_stable_peers_for_overseer_calculations(void);
 static uint8_t split_unity_level(uint8_t level, affinity_t target_affinity);
 #define TO_UNITY_LEVEL(magic_level, techno_level) \
     ((magic_level << 4) | (techno_level & 0x0F))
-
-// --- LED Management ---
-static void set_affinity_leds_state(enum led_state state);
 
 // --- Mode-specific initialization function declarations ---
 static void init_mode_aura(void);
@@ -118,7 +124,7 @@ static void init_mode_overseer(void);
 static void init_mode_none(void);
 
 // --- BLE Advertisement/Scan Handlers ---
-static void handle_master_adv(const bt_addr_le_t *addr, const uint8_t *target_mac, uint8_t mode, uint8_t affinity, uint8_t level, int8_t rssi);
+static void handle_master_adv(const bt_addr_le_t *addr, const uint8_t *target_mac, uint8_t mode, uint8_t affinity, uint8_t level, int8_t dynamic_threshold, int8_t rssi);
 static void handle_zephyr_device(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi);
 static void handle_zephyr_aura(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi);
 static void handle_zephyr_none(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi);
@@ -139,6 +145,7 @@ static void set_mode(operation_mode_t mode);
 // --- BLE/Flash Initialization ---
 static int init_flash(void);
 static void generate_static_random_addr(bt_addr_le_t *addr);
+static void system_restart(void);
 
 // --- Main Loop and Entry Point ---
 static void main_loop(void);
@@ -294,6 +301,17 @@ static bool is_peer_valid_for_calculation(const peer_t *peer) {
 
 // --- End Hash Table Implementation ---
 
+// Helper function to check if RSSI passes dynamic threshold for device mode
+static bool check_dynamic_rssi_threshold(int8_t rssi) {
+    // If dynamic threshold is 0, it's disabled - use default behavior
+    if (device_info.dynamic_rssi_threshold == 0) {
+        return true; // Dynamic threshold disabled
+    }
+    
+    // Apply dynamic threshold
+    return rssi >= device_info.dynamic_rssi_threshold;
+}
+
 // Split unity level into magic and techno components
 // For Unity, it returns the biggest part
 static uint8_t split_unity_level(uint8_t level, affinity_t target_affinity) {
@@ -319,9 +337,8 @@ static void init_mode_aura(void) {
     // Set other aura state fields as needed
 
     prepare_mesh_adv_data(mode_state.aura.is_active);
-    set_led_state(AURA_STATE_OK_LED, LED_ON); // Set LEDs to ON initially
-    set_led_state(AURA_PROBLEM_LED, LED_OFF); // Set problem LED off initially
-    set_led_state(ON_BOARD_LED, LED_ON); // Set on-board LED to ON
+    set_led_state(GREEN_LED_PIN, LED_ON); // Set LEDs to ON initially
+    set_led_state(RED_LED_PIN, LED_OFF); // Set problem LED off initially
     // Use slower intervals for high peer density environments
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
@@ -345,16 +362,14 @@ static void end_of_cycle_aura(void) {
         if ( mode_state.aura.hostility_counter < HOSTILE_ENVIRONMENT_TRESHOLD ) {
             // If in hostile environment, increase hostility counter
             mode_state.aura.hostility_counter++;
-            set_led_state(ON_BOARD_LED, mode_state.aura.is_active);
-            set_led_state(AURA_STATE_OK_LED, mode_state.aura.is_active);
-            set_led_state(AURA_PROBLEM_LED, mode_state.aura.is_active ? LED_BLINK_ONCE : LED_ON);
+            set_led_state(GREEN_LED_PIN, mode_state.aura.is_active);
+            set_led_state(RED_LED_PIN, mode_state.aura.is_active ? LED_BLINK_ONCE : LED_ON);
         }
         // Aura mode: check if hostility counter is high, if so, blink LEDs
         if (mode_state.aura.hostility_counter >= HOSTILE_ENVIRONMENT_TRESHOLD) {
             // Blink LEDs to indicate active aura mode
-            set_led_state(ON_BOARD_LED, LED_OFF);
-            set_led_state(AURA_STATE_OK_LED, LED_OFF);
-            set_led_state(AURA_PROBLEM_LED, LED_ON);
+            set_led_state(GREEN_LED_PIN, LED_OFF);
+            set_led_state(RED_LED_PIN, LED_ON);
             mode_state.aura.is_active = 0; // Disable aura
             prepare_aura_mesh_adv_data(mode_state.aura.is_active);
         }
@@ -363,14 +378,13 @@ static void end_of_cycle_aura(void) {
         mode_state.aura.hostility_counter--;
         // If hostility counter is zero, SET LEDs back to ON
         if (mode_state.aura.hostility_counter == 0) {
-            set_led_state(ON_BOARD_LED, LED_ON);
-            set_led_state(AURA_STATE_OK_LED, LED_ON);
-            set_led_state(AURA_PROBLEM_LED, LED_OFF);
+            set_led_state(GREEN_LED_PIN, LED_ON);
+            set_led_state(RED_LED_PIN, LED_OFF);
             mode_state.aura.is_active = 1; // Enable aura
             prepare_aura_mesh_adv_data(mode_state.aura.is_active);
         } else {
-            set_led_state(ON_BOARD_LED, LED_BLINK_ONCE);
-            set_led_state(AURA_STATE_OK_LED, LED_BLINK_ONCE);
+            set_led_state(GREEN_LED_PIN, LED_BLINK_ONCE);
+            set_led_state(RED_LED_PIN, LED_ON);
         }
     }
 }
@@ -387,9 +401,7 @@ static void init_mode_device(void) {
     mode_state.device.overseer_state = 0;
     mode_state.device.use_overseer = 0;
 
-    set_led_state(ON_BOARD_LED, 
-        mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
-    set_led_state(DEVICE_STATE_OK_LED, 
+    set_led_state(GREEN_LED_PIN, 
         mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
     set_led_state(DEVICE_OUTPUT_PIN, mode_state.device.is_on);
 
@@ -402,6 +414,11 @@ static void handle_zephyr_device(const bt_addr_le_t *addr, device_info_t *peer_i
     // Only process peers advertising MODE_AURA
     if (peer_info->mode != MODE_AURA || ! state ) {
         return; // Only interested in AURA mode
+    }
+
+    // Apply dynamic RSSI threshold if enabled
+    if (!check_dynamic_rssi_threshold(rssi)) {
+        return; // Signal too weak according to dynamic threshold
     }
 
     count_peer(addr->a.val, peer_info);
@@ -475,6 +492,7 @@ static void end_of_cycle_device(void) {
     track_overseer();
     
     uint8_t new_device_state;
+    uint8_t is_suppressed = 0;
     
     if (mode_state.device.use_overseer) {
         // Use overseer-commanded state
@@ -498,6 +516,7 @@ static void end_of_cycle_device(void) {
             } else {
                 // If hostile auras are more, turn device OFF
                 new_device_state = 0;
+                is_suppressed = 1;
                 break;
             }
         }
@@ -505,12 +524,15 @@ static void end_of_cycle_device(void) {
 
     if (new_device_state != mode_state.device.is_on) {
         mode_state.device.is_on = new_device_state;
-        set_led_state(ON_BOARD_LED, 
-            mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
-        set_led_state(DEVICE_STATE_OK_LED, 
+        set_led_state(GREEN_LED_PIN, 
             mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
         set_led_state(DEVICE_OUTPUT_PIN, 
             mode_state.device.is_on);
+        if ( is_suppressed ) {
+            set_led_state(RED_LED_PIN, LED_ON); // Indicate suppression
+        } else {
+            set_led_state(RED_LED_PIN, LED_OFF); // No suppression
+        }
         prepare_mesh_adv_data(mode_state.device.is_on);
     }    
 }
@@ -524,8 +546,7 @@ static void init_mode_lvlup_token(void) {
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
     // indicate that the level-up token is in "charged" state
-    set_led_state(ON_BOARD_LED, LED_ON); 
-    set_led_state(LED_14, LED_ON);
+    set_led_state(GREEN_LED_PIN, LED_ON);
 }
 
 static void handle_zephyr_lvlup_token(const bt_addr_le_t *addr, device_info_t *peer_info, uint8_t state, int8_t rssi) {
@@ -545,6 +566,7 @@ static void handle_zephyr_lvlup_token(const bt_addr_le_t *addr, device_info_t *p
         // Convert the peer affinity to Unity
         mode_state.lvlup_token.device_info.affinity = AFFINITY_UNITY;
         mode_state.lvlup_token.device_info.mode = MODE_AURA;
+        mode_state.lvlup_token.device_info.dynamic_rssi_threshold = 0; // Default: no dynamic threshold
         if (peer_info->affinity == AFFINITY_MAGIC) {
             mode_state.lvlup_token.device_info.level = TO_UNITY_LEVEL(peer_info->level, 0);
         } else if (peer_info->affinity == AFFINITY_TECHNO) {
@@ -578,6 +600,7 @@ static void handle_zephyr_lvlup_token(const bt_addr_le_t *addr, device_info_t *p
     if ( peer_info->affinity == AFFINITY_UNITY ) {
         mode_state.lvlup_token.device_info.affinity = AFFINITY_UNITY;
         mode_state.lvlup_token.device_info.mode = MODE_AURA;
+        mode_state.lvlup_token.device_info.dynamic_rssi_threshold = 0; // Default: no dynamic threshold
         if (device_info.affinity == AFFINITY_MAGIC) {
             mode_state.lvlup_token.device_info.level 
                 = TO_UNITY_LEVEL(device_info.level, split_unity_level(peer_info->level, AFFINITY_TECHNO));
@@ -590,6 +613,7 @@ static void handle_zephyr_lvlup_token(const bt_addr_le_t *addr, device_info_t *p
         mode_state.lvlup_token.device_info.affinity = peer_info->affinity;
         mode_state.lvlup_token.device_info.mode = MODE_AURA;
         mode_state.lvlup_token.device_info.level = device_info.level; // Give level-up to the target token
+        mode_state.lvlup_token.device_info.dynamic_rssi_threshold = 0; // Default: no dynamic threshold
     }
 
 }
@@ -606,8 +630,7 @@ static void end_of_cycle_lvlup_token(void) {
         memcpy(&adv_data[2 + MAC_LEN], &mode_state.lvlup_token.device_info, sizeof(device_info_t)); // Copy device info
         dynamic_ad[0].data_len = MASTER_ADV_LEN; // Set data length for dynamic advertisement
         // Blink LEDs indicate broadcast
-        set_led_state(ON_BOARD_LED, LED_BLINK_FAST); 
-        set_led_state(LED_14, LED_BLINK_FAST);
+        set_led_state(GREEN_LED_PIN, LED_BLINK_FAST);
         adv_params.interval_min = BT_GAP_ADV_FAST_INT_MIN_2;
         adv_params.interval_max = BT_GAP_ADV_FAST_INT_MAX_2;
     } else if ( mode_state.lvlup_token.broadcast_countdown == 1 ) {
@@ -615,15 +638,14 @@ static void end_of_cycle_lvlup_token(void) {
         // broadcast device state and after that the MAC the tocken we gave level-up to
         if (device_info.level == 1) {
             prepare_mesh_adv_data(1); // Set state to 1 (active), lvl 1 tokens do not expire
-            set_led_state(ON_BOARD_LED, LED_ON); 
-            set_led_state(LED_14, LED_ON);
+            set_led_state(GREEN_LED_PIN, LED_ON);
             peer_count = 0; // Reset peer count after broadcasting
         } else {
             // For other levels, prepare as used
             prepare_mesh_adv_data(0); // Set state to 0 (used)
             // indicate that the level-up token is in "discharged" state
-            set_led_state(ON_BOARD_LED, LED_BLINK_ONCE); 
-            set_led_state(LED_14, LED_BLINK_ONCE);
+            set_led_state(GREEN_LED_PIN, LED_OFF);
+            set_led_state(RED_LED_PIN, LED_BLINK_ONCE);
         }
         memcpy(adv_data + MESH_ADV_LEN, mode_state.lvlup_token.mac, MAC_LEN); // Copy target MAC
         dynamic_ad[0].data_len = MESH_ADV_LEN + MAC_LEN; // Set data length for dynamic advertisement
@@ -642,8 +664,7 @@ static void init_mode_overseer(void) {
     // Keep original level and affinity for proper peer classification
     
     prepare_overseer_adv_data();
-    set_led_state(ON_BOARD_LED, LED_BLINK_ONCE); // Set LEDs to blink once initially
-    set_led_state(LED_14, LED_BLINK_ONCE);
+    set_led_state(GREEN_LED_PIN, LED_BLINK_ONCE);
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
 }
@@ -681,7 +702,8 @@ static void init_mode_none(void) {
     memset(&mode_state, 0, sizeof(mode_state));
     // No state to set for none
 
-    set_affinity_leds_state(LED_BLINK_ONCE); // Set LEDs to blink once initially
+    set_led_state(GREEN_LED_PIN, LED_BLINK_ONCE); // Set LEDs to blink once initially
+    set_led_state(RED_LED_PIN, LED_BLINK_ONCE);
     prepare_mesh_adv_data(0);
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
     adv_params.interval_max = BT_GAP_ADV_SLOW_INT_MAX;
@@ -697,16 +719,19 @@ static void end_of_cycle_none(void) {
 
 // --- Common/utility handlers ---
 
-// Handle master advertisements that may change device_info
-static void handle_master_adv(const bt_addr_le_t *addr, const uint8_t *target_mac, uint8_t mode, uint8_t affinity, uint8_t level, int8_t rssi) {
+// Handle master advertisements that may change device_info and dynamic threshold
+static void handle_master_adv(const bt_addr_le_t *addr, const uint8_t *target_mac, uint8_t mode, uint8_t affinity, uint8_t level, int8_t dynamic_threshold, int8_t rssi) {
     // Ignore if target_mac does not match this device's MAC
     if (memcmp(target_mac, static_addr.a.val, MAC_LEN) != 0) {
         return;
     }
+    
     device_info_t new_info;
     new_info.mode = mode;
     new_info.affinity = affinity;
     new_info.level = level;
+    new_info.dynamic_rssi_threshold = dynamic_threshold;
+    
     if (memcmp(&device_info, &new_info, sizeof(device_info_t)) != 0) {
         mode_changed = true;
         device_info = new_info;
@@ -719,6 +744,11 @@ static void handle_overseer_adv(const bt_addr_le_t *addr, const uint8_t *data, i
     // Only process in device mode
     if (device_info.mode != MODE_DEVICE) {
         return;
+    }
+    
+    // Apply dynamic RSSI threshold if enabled
+    if (!check_dynamic_rssi_threshold(rssi)) {
+        return; // Signal too weak according to dynamic threshold
     }
     
     // Check if this overseer is stronger than current one or if no overseer tracked
@@ -796,8 +826,12 @@ static void count_stable_peers_for_overseer_calculations(void) {
 // Set handlers based on mode
 static void set_mode(operation_mode_t mode) {
     set_led_state(ON_BOARD_LED, LED_BLINK_FAST); // Start with blinking LED
+    set_led_state(RED_LED_PIN, LED_BLINK_FAST);
+    set_led_state(GREEN_LED_PIN, LED_BLINK_FAST);
     operate_leds(STARTUP_DELAY_MS, BLINK_INTERVAL_MS); // Operate LEDs for 5 second, blink every 250ms
     set_led_state(ON_BOARD_LED, LED_OFF);
+    set_led_state(GREEN_LED_PIN, LED_OFF);
+    set_led_state(RED_LED_PIN, LED_OFF);
     switch (mode) {
         case MODE_AURA:
             current_zephyr_handler = handle_zephyr_aura;
@@ -866,13 +900,13 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         // Call mesh handler (pass addr, peer_info, state, rssi)
         current_zephyr_handler(addr, &peer_info, state, rssi);
     } else if (mfg_len >= MASTER_ADV_LEN && mfg[0] == 0xAB && mfg[1] == 0xAC) {
-        // Master advertisement
+        // Master advertisement - format: [0xAB, 0xAC, target_mac[6], device_info_t]
         uint8_t *target_mac = &mfg[2];
-        uint8_t mode = mfg[2 + MAC_LEN];
-        uint8_t affinity = mfg[3 + MAC_LEN];
-        uint8_t level = mfg[4 + MAC_LEN];
-        // Call master handler (pass addr, target_mac, mode, affinity, level, rssi)
-        handle_master_adv(addr, target_mac, mode, affinity, level, rssi);
+        device_info_t new_device_info;
+        memcpy(&new_device_info, &mfg[2 + MAC_LEN], sizeof(device_info_t));
+        // Call master handler (pass addr, target_mac, new_device_info, rssi)
+        handle_master_adv(addr, target_mac, new_device_info.mode, new_device_info.affinity, 
+                         new_device_info.level, new_device_info.dynamic_rssi_threshold, rssi);
     } else if (mfg_len >= OVERSEER_ADV_LEN && mfg[0] == 0xDE && mfg[1] == 0xAD) {
         // Overseer advertisement
         handle_overseer_adv(addr, &mfg[2], rssi);
@@ -977,6 +1011,12 @@ static void generate_static_random_addr(bt_addr_le_t *addr)
     addr->a.val[5] &= 0xC3;
 }
 
+// Trigger system restart (similar to power cycle)
+static void system_restart(void)
+{
+    sys_reboot(SYS_REBOOT_COLD); // Cold reset - most similar to power cycle
+}
+
 // --- Unified main loop ---
 // Optimized for high peer density (120-130 peers) with:
 // - 5 second scan cycles (vs 1.5s)
@@ -1017,28 +1057,6 @@ static void main_loop(void)
         if (mode_changed) {
             set_mode(device_info.mode);
         }
-    }
-}
-
-// Set the state of affinity LEDs based on device_info.affinity
-static void set_affinity_leds_state(enum led_state state) {
-    switch (device_info.affinity) {
-        case AFFINITY_MAGIC:
-            set_led_state(ON_BOARD_LED, state);
-            set_led_state(LED_14, state);
-            break;
-        case AFFINITY_TECHNO:
-            set_led_state(ON_BOARD_LED, state);
-            set_led_state(LED_15, state);
-            break;
-        case AFFINITY_UNITY:
-            set_led_state(ON_BOARD_LED, state);
-            set_led_state(LED_14, state);
-            set_led_state(LED_15, state);
-            break;
-        default:
-            // Invalid affinity, do nothing
-            break;
     }
 }
 

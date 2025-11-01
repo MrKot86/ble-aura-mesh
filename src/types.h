@@ -10,6 +10,8 @@ extern "C" {
 // Use enum for LED indexes for readability
 typedef enum {
     ON_BOARD_LED = 0,
+    LED_12,
+    LED_13,
     LED_14,
     LED_15,
     LED_IDX_MAX
@@ -46,6 +48,7 @@ typedef struct {
     uint8_t mode; // operation_mode_t
     uint8_t affinity; // affinity_t
     uint8_t level; // 0 to 3, 4 = hostile environment
+    int8_t dynamic_rssi_threshold; // Dynamic RSSI threshold (0 = disabled, use default)
 } device_info_t;
 
 typedef enum {

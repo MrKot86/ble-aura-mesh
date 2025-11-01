@@ -15,15 +15,22 @@
 #define RSSI_THRESHOLD -70 // RSSI threshold for peer discovery
 #define LVLUP_TOKEN_RSSI_THRESHOLD -45 // RSSI threshold for level-up token discovery (really close)
 
+// Dynamic RSSI threshold feature:
+// - Stored in device_info_t.dynamic_rssi_threshold
+// - Can be set via master advertisement for any device mode
+// - Value 0 = disabled (use default RSSI_THRESHOLD)
+// - If set higher than RSSI_THRESHOLD, effectively no additional filtering
+// - Applied to aura and overseer advertisements in device mode, extensible to other modes
+
 // Peer tracking thresholds
-#define PEER_DETECTION_THRESHOLD 3  // Consecutive detections needed to include peer in calculations
-#define PEER_MISS_THRESHOLD 6       // Consecutive misses before excluding peer from calculations
+#define PEER_DETECTION_THRESHOLD 2  // Consecutive detections needed to include peer in calculations
+#define PEER_MISS_THRESHOLD 2       // Consecutive misses before excluding peer from calculations
 #define OVERSEER_DETECTION_THRESHOLD 3  // Consecutive detections needed to trust overseer
 #define OVERSEER_MISS_THRESHOLD 6       // Consecutive misses before ignoring overseer
 
 // --- Protocol/Format Length Defines ---
 #define MESH_ADV_LEN 6
-#define MASTER_ADV_LEN (2 + MAC_LEN + 3) // 2 prefix + MAC + 3 fields
+#define MASTER_ADV_LEN (2 + MAC_LEN + sizeof(device_info_t)) // 2 prefix + MAC + device_info_t structure
 #define OVERSEER_ADV_LEN 10 // 2 prefix + 8 bytes for state data (4 levels × 2 affinities)
 
 // Timings - Optimized for 120-130 peer density with responsive device state changes
@@ -47,6 +54,11 @@
 #define LEVELS_PER_AFFINITY 5 // Levels per affinity type (0, 1, 2, 3, 4 = hostile environment)
 #define HOSTILE_ENVIRONMENT_LEVEL 4 // Level for hostile environment
 #define HOSTILE_ENVIRONMENT_TRESHOLD 20 // Threshold for staying in hostile environment before becoming affected. 
+
+// --- PINs assignments ---
+#define GREEN_LED_PIN LED_12
+#define RED_LED_PIN LED_13
+#define DEVICE_OUTPUT_PIN LED_15 // Pin for device output signal
 
 
 #endif // MODE_DEFS_H
