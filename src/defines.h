@@ -28,8 +28,18 @@
 #define OVERSEER_DETECTION_THRESHOLD 3  // Consecutive detections needed to trust overseer
 #define OVERSEER_MISS_THRESHOLD 6       // Consecutive misses before ignoring overseer
 
+// --- Bit-packing Helper Macros ---
+// Advertisement data is nibble-packed to reduce air time and RF congestion
+#define PACK_MODE_AFFINITY(mode, affinity) (((mode) << 4) | ((affinity) & 0x0F))
+#define PACK_LEVEL_STATE(level, state) (((level) << 4) | ((state) & 0x0F) )
+#define PACK_AURA_LEVEL_STATE(level, state, affinity) ((affinity != AFFINITY_UNITY ?  ((level) << 4) | ((state) & 0x0F) : (((level & 0x03) << 4) | ((level & 0x30) << 2))) | ((state) & 0x0F))
+#define UNPACK_MODE(byte) (((byte) >> 4) & 0x0F)
+#define UNPACK_AFFINITY(byte) ((byte) & 0x0F)
+#define UNPACK_LEVEL(byte, affinity) (affinity != AFFINITY_UNITY ? ((byte) >> 4) & 0x0F : (((byte) >> 4) & 0x03) || (((byte) >> 2) & 0x30) )
+#define UNPACK_STATE(byte) ((byte) & 0x0F)
+
 // --- Protocol/Format Length Defines ---
-#define MESH_ADV_LEN 6
+#define MESH_ADV_LEN 5 // Optimized: [header:2][mode|affinity:1][level|state:1][dynamic_rssi:1]
 #define MASTER_ADV_LEN (2 + MAC_LEN + sizeof(device_info_t)) // 2 prefix + MAC + device_info_t structure
 #define OVERSEER_ADV_LEN 10 // 2 prefix + 8 bytes for state data (4 levels × 2 affinities)
 

@@ -6,6 +6,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/*
+ * BLE Aura Mesh - Optimized Advertisement Protocol
+ * 
+ * Advertisement formats (nibble-packed for efficiency):
+ * 
+ * MESH (5 bytes): [0xCE][0xFA][mode|affinity][level|state][dynamic_rssi_threshold]
+ *   - Reduces air time by 16.7% vs previous 6-byte format
+ *   - mode/affinity/level/state packed in nibbles (4 bits each)
+ *   - dynamic_rssi_threshold as signed byte (-128 to +127)
+ * 
+ * MASTER (12 bytes): [0xAB][0xAC][target_mac:6][device_info_t:4]
+ *   - Used for remote device configuration
+ * 
+ * OVERSEER (10 bytes): [0xDE][0xAD][state_data:8]
+ *   - Broadcasts calculated states for all device levels/affinities
+ */
+
 #include <zephyr/types.h>
 #include <stddef.h>
 #include <zephyr/sys/util.h>
@@ -336,7 +353,7 @@ static void init_mode_aura(void) {
     mode_state.aura.is_active = 1; // Example: set aura as active by default
     // Set other aura state fields as needed
 
-    prepare_mesh_adv_data(mode_state.aura.is_active);
+    prepare_aura_mesh_adv_data(mode_state.aura.is_active);
     set_led_state(GREEN_LED_PIN, LED_ON); // Set LEDs to ON initially
     set_led_state(RED_LED_PIN, LED_OFF); // Set problem LED off initially
     // Use slower intervals for high peer density environments
@@ -567,6 +584,10 @@ static void handle_zephyr_lvlup_token(const bt_addr_le_t *addr, device_info_t *p
         mode_state.lvlup_token.device_info.affinity = AFFINITY_UNITY;
         mode_state.lvlup_token.device_info.mode = MODE_AURA;
         mode_state.lvlup_token.device_info.dynamic_rssi_threshold = 0; // Default: no dynamic threshold
+        if (peer_info->level == HOSTILE_ENVIRONMENT_LEVEL ) {
+            // Unity token cannot be hostile - set to max friendly level
+            peer_info->level = HOSTILE_ENVIRONMENT_LEVEL - 1 ;
+        }
         if (peer_info->affinity == AFFINITY_MAGIC) {
             mode_state.lvlup_token.device_info.level = TO_UNITY_LEVEL(peer_info->level, 0);
         } else if (peer_info->affinity == AFFINITY_TECHNO) {
@@ -731,6 +752,20 @@ static void handle_master_adv(const bt_addr_le_t *addr, const uint8_t *target_ma
     new_info.affinity = affinity;
     new_info.level = level;
     new_info.dynamic_rssi_threshold = dynamic_threshold;
+
+    if ( new_info.affinity == AFFINITY_UNITY ) {
+        if ( new_info.mode == MODE_DEVICE && (new_info.level >= 4) ) {
+            // Unity device mode can only have a single level (0-3)
+            return;
+        } else if ( new_info.mode == MODE_AURA ) {
+            // validate Unity aura levels
+            uint8_t magic_level = split_unity_level(new_info.level, AFFINITY_MAGIC);
+            uint8_t techno_level = split_unity_level(new_info.level, AFFINITY_TECHNO);
+            if ( magic_level > 3 || techno_level > 3 ) {
+                return; // Invalid level for Unity affinity
+            }
+        }
+    }
     
     if (memcmp(&device_info, &new_info, sizeof(device_info_t)) != 0) {
         mode_changed = true;
@@ -892,11 +927,12 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         temp.len -= length;
     }
     if (mfg_len >= MESH_ADV_LEN && mfg[0] == 0xCE && mfg[1] == 0xFA) {
-        // Mesh device advertisement
-        peer_info.mode = mfg[2];
-        peer_info.affinity = mfg[3];
-        peer_info.level = mfg[4];
-        uint8_t state = mfg[5];
+        // Mesh device advertisement with nibble-packed format
+        peer_info.mode = UNPACK_MODE(mfg[2]);
+        peer_info.affinity = UNPACK_AFFINITY(mfg[2]);
+        peer_info.level = UNPACK_LEVEL(mfg[3], peer_info.affinity);
+        peer_info.dynamic_rssi_threshold = (int8_t)mfg[4];
+        uint8_t state = UNPACK_STATE(mfg[3]);
         // Call mesh handler (pass addr, peer_info, state, rssi)
         current_zephyr_handler(addr, &peer_info, state, rssi);
     } else if (mfg_len >= MASTER_ADV_LEN && mfg[0] == 0xAB && mfg[1] == 0xAC) {
@@ -914,26 +950,25 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 }
 
 
-// Prepares mesh advertisement data: [0xCE, 0xFA, mode, affinity, level, state]
+// Prepares mesh advertisement data with nibble-packed format
+// Format: [0xCE, 0xFA, mode|affinity, level|state, dynamic_rssi_threshold]
 static void prepare_mesh_adv_data(uint8_t state) {
     adv_data[0] = 0xCE;
     adv_data[1] = 0xFA;
-    adv_data[2] = device_info.mode;
-    adv_data[3] = device_info.affinity;
-    adv_data[4] = device_info.level;
-    adv_data[5] = state;
-    // The rest of adv_data is unused for mesh adv (MESH_ADV_LEN bytes only)
+    adv_data[2] = PACK_MODE_AFFINITY(device_info.mode, device_info.affinity);
+    adv_data[3] = PACK_LEVEL_STATE(device_info.level, state);
+    adv_data[4] = (uint8_t)device_info.dynamic_rssi_threshold;
     dynamic_ad[0].data_len = MESH_ADV_LEN;
 }
 
+// Prepares aura mesh advertisement data with nibble-packed format
+// Format: [0xCE, 0xFA, mode|affinity, level|state, dynamic_rssi_threshold]
 static void prepare_aura_mesh_adv_data(uint8_t state) {
     adv_data[0] = 0xCE;
     adv_data[1] = 0xFA;
-    adv_data[2] = device_info.mode;
-    adv_data[3] = device_info.affinity;
-    adv_data[4] = device_info.level;
-    adv_data[5] = state;
-    // The rest of adv_data is unused for mesh adv (MESH_ADV_LEN bytes only)
+    adv_data[2] = PACK_MODE_AFFINITY(device_info.mode, device_info.affinity);
+    adv_data[3] = PACK_AURA_LEVEL_STATE(device_info.level, state, device_info.affinity);
+    adv_data[4] = (uint8_t)device_info.dynamic_rssi_threshold;
     dynamic_ad[0].data_len = MESH_ADV_LEN;
 }
 
