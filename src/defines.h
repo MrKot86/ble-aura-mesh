@@ -2,8 +2,8 @@
 #define MODE_DEFS_H
 
 // Flash
-#define FLASH_AREA_OFFSET(storage_partition) 0x00038000
-#define FLASH_AREA_SIZE(storage_partition) 0x4000
+#define FLASH_AREA_OFFSET(storage_partition) 0x00028000
+#define FLASH_AREA_SIZE(storage_partition) 0x8000
 #define NVS_ID_DEVICE_INFO 1 // Device info ID in NVS
 #define NVS_ID_STATIC_ADDR 2
 

@@ -41,15 +41,11 @@
 #include "types.h"
 #include "defines.h"
 
-#define LED_NODE DT_ALIAS(led0)  // Maps to 'led0' in your board's device tree
-#define LED_12_NODE DT_ALIAS(led12)  // Maps to 'led12' in your board's device tree
-#define LED_13_NODE DT_ALIAS(led13)  // Maps to 'led13' in your board's device tree
-#define LED_14_NODE DT_ALIAS(led14)  // Maps to 'led14' in your board's device tree
-#define LED_15_NODE DT_ALIAS(led15)  // Maps to 'led15' in your board's device tree
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
+#define LED_12_NODE DT_ALIAS(led1)  
+#define LED_13_NODE DT_ALIAS(led0) 
+#define LED_15_NODE DT_ALIAS(out0) 
 static const struct gpio_dt_spec led12 = GPIO_DT_SPEC_GET(LED_12_NODE, gpios);
 static const struct gpio_dt_spec led13 = GPIO_DT_SPEC_GET(LED_13_NODE, gpios);
-static const struct gpio_dt_spec led14 = GPIO_DT_SPEC_GET(LED_14_NODE, gpios);
 static const struct gpio_dt_spec led15 = GPIO_DT_SPEC_GET(LED_15_NODE, gpios);
 
 
@@ -73,10 +69,7 @@ static struct bt_data dynamic_ad[] = {
     BT_DATA(BT_DATA_MANUFACTURER_DATA, adv_data, MESH_ADV_LEN),
 };
 static struct bt_le_adv_param adv_params = {
-    .id = BT_ID_DEFAULT,
-    .sid = 0,
-    .secondary_max_skip = 0,
-    .options = BT_LE_ADV_OPT_USE_IDENTITY | BT_LE_ADV_OPT_USE_NAME,
+    .options = BT_LE_ADV_OPT_USE_IDENTITY, 
     .interval_min = BT_GAP_ADV_SLOW_INT_MIN,
     .interval_max = BT_GAP_ADV_SLOW_INT_MAX,
     .peer = NULL,
@@ -102,10 +95,8 @@ device_info_t device_info = {
 
 // LED Management
 static struct led_entry led_array[LED_IDX_MAX] = {
-    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led },       // On-board LED (normal)
     { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led12 },     // LED 12 (inverted)
     { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led13 },   // LED 13 (inverted)
-    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led14 },     // LED 14 (normal)
     { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led15 }      // LED 15 (normal)
 };  
 
@@ -161,7 +152,6 @@ static void set_mode(operation_mode_t mode);
 
 // --- BLE/Flash Initialization ---
 static int init_flash(void);
-static void generate_static_random_addr(bt_addr_le_t *addr);
 static void system_restart(void);
 
 // --- Main Loop and Entry Point ---
@@ -860,11 +850,9 @@ static void count_stable_peers_for_overseer_calculations(void) {
 
 // Set handlers based on mode
 static void set_mode(operation_mode_t mode) {
-    set_led_state(ON_BOARD_LED, LED_BLINK_FAST); // Start with blinking LED
     set_led_state(RED_LED_PIN, LED_BLINK_FAST);
     set_led_state(GREEN_LED_PIN, LED_BLINK_FAST);
     operate_leds(STARTUP_DELAY_MS, BLINK_INTERVAL_MS); // Operate LEDs for 5 second, blink every 250ms
-    set_led_state(ON_BOARD_LED, LED_OFF);
     set_led_state(GREEN_LED_PIN, LED_OFF);
     set_led_state(RED_LED_PIN, LED_OFF);
     switch (mode) {
@@ -1035,17 +1023,6 @@ static void prepare_overseer_adv_data(void) {
     }
 }
 
-// Generate a static random MAC address
-static void generate_static_random_addr(bt_addr_le_t *addr)
-{
-    addr->type = BT_ADDR_LE_RANDOM;
-    for (int i = 0; i < 6; ++i) {
-        addr->a.val[i] = sys_rand32_get() & 0xFF;
-    }
-    addr->a.val[5] |= 0xC0;
-    addr->a.val[5] &= 0xC3;
-}
-
 // Trigger system restart (similar to power cycle)
 static void system_restart(void)
 {
@@ -1061,11 +1038,12 @@ static void main_loop(void)
 {
     set_mode(device_info.mode);
     while (1) {
-        // --- Scanning phase ---
+        
         int err;
-        err = bt_le_scan_start(&scan_param, scan_cb);
+        // --- Advertising phase ---
+        err = bt_le_adv_start(&adv_params, dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
         if (err) {
-            printk("Scan start failed: %d\n", err);
+            printk("Adv start failed: %d\n", err);
         }
         
         // Add random jitter to maximize scanning window before advertising
@@ -1073,10 +1051,11 @@ static void main_loop(void)
         uint32_t jitter_ms = sys_rand32_get() % PEER_DISCOVERY_JITTER_MS;
         operate_leds(jitter_ms, jitter_ms); // Random delay using LED operation
         
-        // --- Advertising phase ---
-        err = bt_le_adv_start(&adv_params, dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
+        
+        // --- Scanning phase ---
+        err = bt_le_scan_start(&scan_param, scan_cb);
         if (err) {
-            printk("Adv start failed: %d\n", err);
+            printk("Scan start failed: %d\n", err);
         }
         
         // Continue scanning and advertising for the remaining cycle time
@@ -1140,31 +1119,25 @@ int main(void)
     // Initialize peer hash table
     clear_peer_table();
 
-    /* Try to read static address from flash */
-    err = nvs_read(&fs, NVS_ID_STATIC_ADDR, &static_addr, sizeof(static_addr));
-    if (err < 0) {
-        // Not found, generate and store
-        generate_static_random_addr(&static_addr);
-        BT_ADDR_SET_STATIC(&(static_addr.a));
-        err = nvs_write(&fs, NVS_ID_STATIC_ADDR, &static_addr, sizeof(static_addr));
-        if (err < 0) {
-            printk("Failed to write static address to flash (err %d)\n", err);
-            return 0;
-        }
-        printk("Generated and stored new static address\n");
-    } else {
-        printk("Loaded static address from flash\n");
-    }
-
-    err = bt_id_create(&static_addr, NULL);
-    if (err) {
-        printk("Failed to set static random address (err %d)\n", err);
-        return 0;
-    }
-
     /* Initialize the Bluetooth Subsystem */
     err = bt_enable(NULL);
     if (err) {
+        printk("Failed to enable Bluetooth (err %d)\n", err);
+        return 0;
+    }
+    
+    // Get the device address (will be static random if no factory address available)
+    bt_addr_le_t addrs[1];
+    size_t count = 1;
+    bt_id_get(addrs, &count);
+    if (count > 0) {
+        memcpy(&static_addr, &addrs[0], sizeof(bt_addr_le_t));
+        printk("Device MAC: %02X:%02X:%02X:%02X:%02X:%02X (type=%s)\n",
+               static_addr.a.val[5], static_addr.a.val[4], static_addr.a.val[3],
+               static_addr.a.val[2], static_addr.a.val[1], static_addr.a.val[0],
+               static_addr.type == BT_ADDR_LE_PUBLIC ? "public" : "random");
+    } else {
+        printk("Failed to get Bluetooth identity\n");
         return 0;
     }
 

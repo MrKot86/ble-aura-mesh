@@ -9,10 +9,8 @@ extern "C" {
 
 // Use enum for LED indexes for readability
 typedef enum {
-    ON_BOARD_LED = 0,
     LED_12,
     LED_13,
-    LED_14,
     LED_15,
     LED_IDX_MAX
 } led_index_t;
