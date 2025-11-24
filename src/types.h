@@ -7,14 +7,6 @@ extern "C" {
 
 #include <stdint.h>
 
-// Use enum for LED indexes for readability
-typedef enum {
-    LED_12,
-    LED_13,
-    LED_15,
-    LED_IDX_MAX
-} led_index_t;
-
 typedef enum {
     // MASTER advertisement can change device mode
     ADV_TYPE_MASTER,

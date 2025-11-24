@@ -27,6 +27,7 @@
 #include <stddef.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pwm.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/kernel.h>
@@ -40,13 +41,17 @@
 #include "LEDManager.h"
 #include "types.h"
 #include "defines.h"
+#include "errors.h"
 
-#define LED_12_NODE DT_ALIAS(led1)  
-#define LED_13_NODE DT_ALIAS(led0) 
-#define LED_15_NODE DT_ALIAS(out0) 
-static const struct gpio_dt_spec led12 = GPIO_DT_SPEC_GET(LED_12_NODE, gpios);
-static const struct gpio_dt_spec led13 = GPIO_DT_SPEC_GET(LED_13_NODE, gpios);
-static const struct gpio_dt_spec led15 = GPIO_DT_SPEC_GET(LED_15_NODE, gpios);
+#define PIN_OUT_NODE DT_ALIAS(out0)
+#define PWM_LED_B_NODE DT_ALIAS(bluepwmled)
+#define PWM_LED_R_NODE DT_ALIAS(redpwmled)
+#define PWM_LED_G_NODE DT_ALIAS(greenpwmled)
+
+static const struct gpio_dt_spec pinOut = GPIO_DT_SPEC_GET(PIN_OUT_NODE, gpios);
+static const struct pwm_dt_spec pwm_led_b = PWM_DT_SPEC_GET(PWM_LED_B_NODE);
+static const struct pwm_dt_spec pwm_led_r = PWM_DT_SPEC_GET(PWM_LED_R_NODE);
+static const struct pwm_dt_spec pwm_led_g = PWM_DT_SPEC_GET(PWM_LED_G_NODE);
 
 
 /******* Global Variables **************/
@@ -93,12 +98,20 @@ device_info_t device_info = {
     .dynamic_rssi_threshold = 0 // 0 = disabled, use default RSSI_THRESHOLD
 };
 
-// LED Management
-static struct led_entry led_array[LED_IDX_MAX] = {
-    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led12 },     // LED 12 (inverted)
-    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led13 },   // LED 13 (inverted)
-    { .state = LED_OFF, .polarity = LED_NORMAL, .gpio = &led15 }      // LED 15 (normal)
-};  
+// Global error tracking variable
+static int last_error = ERROR_SUCCESS;
+
+// LED Management (2 PWM LEDs for visual feedback)
+static struct led_entry led_array[3] = {
+    { .state = LED_OFF, .pwm = &pwm_led_b },
+    { .state = LED_OFF, .pwm = &pwm_led_r },
+    { .state = LED_OFF, .pwm = &pwm_led_g }
+};
+
+// Direct output pin control (active high)
+static void set_output_pin(bool state) {
+    gpio_pin_set_dt(&pinOut, state);
+}  
 
 /******* Functions Declarations **************/
 // --- Hash Table Functions ---
@@ -410,7 +423,7 @@ static void init_mode_device(void) {
 
     set_led_state(GREEN_LED_PIN, 
         mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
-    set_led_state(DEVICE_OUTPUT_PIN, mode_state.device.is_on);
+    set_output_pin(mode_state.device.is_on);
 
     prepare_mesh_adv_data(mode_state.device.is_on);
     adv_params.interval_min = BT_GAP_ADV_SLOW_INT_MIN;
@@ -533,8 +546,7 @@ static void end_of_cycle_device(void) {
         mode_state.device.is_on = new_device_state;
         set_led_state(GREEN_LED_PIN, 
             mode_state.device.is_on ? LED_ON : LED_BLINK_ONCE);
-        set_led_state(DEVICE_OUTPUT_PIN, 
-            mode_state.device.is_on);
+        set_output_pin(mode_state.device.is_on);
         if ( is_suppressed ) {
             set_led_state(RED_LED_PIN, LED_ON); // Indicate suppression
         } else {
@@ -1043,7 +1055,7 @@ static void main_loop(void)
         // --- Advertising phase ---
         err = bt_le_adv_start(&adv_params, dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
         if (err) {
-            printk("Adv start failed: %d\n", err);
+            last_error = ERROR_ADV_START;
         }
         
         // Add random jitter to maximize scanning window before advertising
@@ -1055,7 +1067,7 @@ static void main_loop(void)
         // --- Scanning phase ---
         err = bt_le_scan_start(&scan_param, scan_cb);
         if (err) {
-            printk("Scan start failed: %d\n", err);
+            last_error = ERROR_SCAN_START;
         }
         
         // Continue scanning and advertising for the remaining cycle time
@@ -1085,7 +1097,7 @@ static int init_flash(void)
     struct flash_pages_info info;
     err = flash_get_page_info_by_offs(flash_dev, fs.offset, &info);
     if (err) {
-        printk("Failed to get flash page info (err %d)\n", err);
+        last_error = ERROR_FLASH_PAGE_INFO;
         return 1;
     }
 
@@ -1097,7 +1109,7 @@ static int init_flash(void)
 
     err = nvs_mount(&fs);
     if (err) {
-        printk("Failed to mount NVS file system (err %d)\n", err);
+        last_error = ERROR_NVS_MOUNT;
         return err;
     }
 
@@ -1109,8 +1121,18 @@ int main(void)
 {
     int err;
 
-    // Array of pointers to LED gpio_dt_spec
-    init_led_manager(led_array, LED_IDX_MAX); // 1 second interval, 3 LEDs
+    // Initialize LED manager with PWM support (3 LEDs)
+    init_led_manager(led_array, 3);
+    
+    // Set LED brightness to 50% to save power (adjustable: 0-100%)
+    set_led_brightness(-1, 10); // -1 sets global brightness for all LEDs
+
+    // Initialize output pin (active high)
+    if (!device_is_ready(pinOut.port)) {
+        last_error = ERROR_GPIO_NOT_READY;
+        return 1;
+    }
+    gpio_pin_configure_dt(&pinOut, GPIO_OUTPUT_INACTIVE);
 
     if (init_flash() ) {
         return 1;
@@ -1122,7 +1144,7 @@ int main(void)
     /* Initialize the Bluetooth Subsystem */
     err = bt_enable(NULL);
     if (err) {
-        printk("Failed to enable Bluetooth (err %d)\n", err);
+        last_error = ERROR_BT_ENABLE;
         return 0;
     }
     
@@ -1132,12 +1154,8 @@ int main(void)
     bt_id_get(addrs, &count);
     if (count > 0) {
         memcpy(&static_addr, &addrs[0], sizeof(bt_addr_le_t));
-        printk("Device MAC: %02X:%02X:%02X:%02X:%02X:%02X (type=%s)\n",
-               static_addr.a.val[5], static_addr.a.val[4], static_addr.a.val[3],
-               static_addr.a.val[2], static_addr.a.val[1], static_addr.a.val[0],
-               static_addr.type == BT_ADDR_LE_PUBLIC ? "public" : "random");
     } else {
-        printk("Failed to get Bluetooth identity\n");
+        last_error = ERROR_BT_ID_GET;
         return 0;
     }
 
@@ -1145,9 +1163,6 @@ int main(void)
     err = nvs_read(&fs, NVS_ID_DEVICE_INFO, &device_info, sizeof(device_info));
     if (err < 0) {
         // Not found, use default (already initialized)
-        printk("No device_info in flash, using default\n");
-    } else {
-        printk("Loaded device_info from flash: mode=%d affinity=%d level=%d\n", device_info.mode, device_info.affinity, device_info.level);
     }
 
     main_loop();

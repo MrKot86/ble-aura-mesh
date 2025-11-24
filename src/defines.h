@@ -2,8 +2,6 @@
 #define MODE_DEFS_H
 
 // Flash
-#define FLASH_AREA_OFFSET(storage_partition) 0x00028000
-#define FLASH_AREA_SIZE(storage_partition) 0x8000
 #define NVS_ID_DEVICE_INFO 1 // Device info ID in NVS
 #define NVS_ID_STATIC_ADDR 2
 
@@ -66,9 +64,9 @@
 #define HOSTILE_ENVIRONMENT_TRESHOLD 20 // Threshold for staying in hostile environment before becoming affected. 
 
 // --- PINs assignments ---
-#define GREEN_LED_PIN LED_12
-#define RED_LED_PIN LED_13
-#define DEVICE_OUTPUT_PIN LED_15 // Pin for device output signal
+#define BLUE_LED_PIN 0   // Blue LED index in led_array
+#define RED_LED_PIN 1    // Red LED index in led_array
+#define GREEN_LED_PIN 2  // Green LED index in led_array
 
 
 #endif // MODE_DEFS_H
